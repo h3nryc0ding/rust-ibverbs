@@ -3,5 +3,5 @@ resolver = "2"
 members = [
     "ibverbs",
     "ibverbs-sys",
-    "zerocopy",
+    "zerocopy-rdma",
 ]

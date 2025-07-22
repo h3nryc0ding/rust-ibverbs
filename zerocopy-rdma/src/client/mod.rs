@@ -1,5 +1,6 @@
 mod client;
 
+use crate::protocol;
 use std::{io, net};
 
 pub fn run(ctx: ibverbs::Context, socket: net::SocketAddr) -> io::Result<()> {
@@ -9,10 +10,14 @@ pub fn run(ctx: ibverbs::Context, socket: net::SocketAddr) -> io::Result<()> {
     let mut client = client.connect(socket)?;
     println!("Connected to server at {}", socket);
 
-    let req = b"hello world";
-    println!("Sending request: {}", String::from_utf8_lossy(req));
-    let res = client.request(&req[..])?;
-    println!("Received response: {}", String::from_utf8_lossy(&res));
+    let requests = ["Hello World", "Foo Bar Baz", "Lorem Impsum"];
+
+    for &request in requests.iter() {
+        let req = protocol::EchoPacket::new(request);
+        println!("Sending request: {}", &req.as_str());
+        let res = client.request(&req)?;
+        println!("Received response: {}", res.as_str());
+    }
 
     Ok(())
 }

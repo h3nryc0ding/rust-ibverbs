@@ -24,9 +24,12 @@ impl Initialized {
     pub fn new(ctx: Context) -> io::Result<Initialized> {
         let cq = ctx.create_cq(64, 0)?;
         let pd = ctx.alloc_pd()?;
-        let qp = pd.create_qp(&cq, &cq, ibv_qp_type::IBV_QPT_RC)?.build()?;
-        let mr_send = pd.allocate(256)?;
-        let mr_recv = pd.allocate(256)?;
+        let qp = pd
+            .create_qp(&cq, &cq, ibv_qp_type::IBV_QPT_RC)?
+            .allow_remote_rw()
+            .build()?;
+        let mr_send = pd.allocate(136)?;
+        let mr_recv = pd.allocate(136)?;
         Ok(Initialized {
             ctx,
             cq,
@@ -59,11 +62,11 @@ impl Initialized {
 }
 
 pub struct Connected {
-    ctx: Context,
-    cq: CompletionQueue,
-    pd: ProtectionDomain,
-    qp: QueuePair,
-    mr_send: MemoryRegion<Vec<u8>>,
-    mr_recv: MemoryRegion<Vec<u8>>,
-    remote_mr: RemoteMemoryRegion,
+    pub ctx: Context,
+    pub cq: CompletionQueue,
+    pub pd: ProtectionDomain,
+    pub qp: QueuePair,
+    pub mr_send: MemoryRegion<Vec<u8>>,
+    pub mr_recv: MemoryRegion<Vec<u8>>,
+    pub remote_mr: RemoteMemoryRegion,
 }
