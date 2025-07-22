@@ -21,8 +21,16 @@ impl EchoPacket {
         unsafe { std::str::from_utf8_unchecked(&self.msg[..self.len]) }
     }
 
-    pub fn bounds(&self) -> ops::Range<usize> {
+    pub const fn bounds(&self) -> ops::Range<usize> {
         // len + msg[0..len]
         0..(size_of::<usize>() + size_of::<u8>() * self.len)
+    }
+
+    pub const fn is_reset(&self) -> bool {
+        self.len == 0
+    }
+
+    pub const fn reset(&mut self) {
+        self.len = 0
     }
 }

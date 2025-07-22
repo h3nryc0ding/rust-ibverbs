@@ -25,8 +25,8 @@ fn main() {
     mr.inner()[0] = 69;
     assert_eq!(mr.inner()[1], 0);
 
-    let local = mr.slice(0..=0);
-    let remote = mr.remote().slice(1..=1);
+    let local = mr.slice(&(0..=0));
+    let remote = mr.remote().slice(&(1..=1));
     qp.post_write(&[local], remote, 1, None).unwrap();
 
     let mut completions = [ibverbs::ibv_wc::default(); 1];

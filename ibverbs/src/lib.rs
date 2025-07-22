@@ -1518,7 +1518,7 @@ impl<T> MemoryRegion<T> {
     }
 
     /// Make a subslice of this memory region.
-    pub fn slice(&self, bounds: impl RangeBounds<usize>) -> LocalMemorySlice {
+    pub fn slice(&self, bounds: &impl RangeBounds<usize>) -> LocalMemorySlice {
         let (addr, length) = calc_addr_len(
             bounds,
             unsafe { *self.mr }.addr as u64,
@@ -1576,7 +1576,7 @@ pub struct RemoteMemoryRegion {
 #[allow(clippy::len_without_is_empty)]
 impl RemoteMemoryRegion {
     /// Make a subslice of this slice.
-    pub fn slice(&self, bounds: impl RangeBounds<usize>) -> RemoteMemorySlice {
+    pub fn slice(&self, bounds: &impl RangeBounds<usize>) -> RemoteMemorySlice {
         let (addr, len) = calc_addr_len(bounds, self.addr, self.len);
         RemoteMemorySlice {
             addr,
@@ -2064,7 +2064,7 @@ impl Drop for QueuePair {
     }
 }
 
-fn calc_addr_len(bounds: impl RangeBounds<usize>, addr: u64, bytes_len: usize) -> (u64, u32) {
+fn calc_addr_len(bounds: &impl RangeBounds<usize>, addr: u64, bytes_len: usize) -> (u64, u32) {
     let start = match bounds.start_bound() {
         std::ops::Bound::Included(i) => *i,
         std::ops::Bound::Excluded(i) => *i + 1,

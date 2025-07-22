@@ -1,9 +1,9 @@
 use crate::protocol::EchoPacket;
 use crate::rdma::{connection, utils};
 use crate::utils::json::{read_json, write_json};
-use bytemuck::{Zeroable, bytes_of, from_bytes};
+use bytemuck::from_bytes_mut;
 use ibverbs::Context;
-use std::{io, net};
+use std::{hint, io, net, ptr};
 
 pub struct Initialized(connection::Initialized);
 
@@ -22,34 +22,36 @@ impl Initialized {
         write_json(&mut stream, &local)?;
 
         let connection = self.0.connect(remote)?;
-        Ok(Connected(connection))
+        Ok(Connected { connection })
     }
 }
 
-pub struct Connected(connection::Connected);
+pub struct Connected {
+    connection: connection::Connected,
+}
 
 impl Connected {
     pub fn serve(&mut self) -> io::Result<()> {
+        let con = &mut self.connection;
+
         loop {
-            // 1. Poll for incoming request
-            let request = from_bytes::<EchoPacket>(self.0.mr_recv.inner());
-            if *request == EchoPacket::zeroed() {
-                continue;
+            let recv_pkt = from_bytes_mut::<EchoPacket>(con.mr_recv.inner());
+            let send_pkt = from_bytes_mut::<EchoPacket>(con.mr_send.inner());
+
+            let recv_ptr = recv_pkt as *const EchoPacket;
+            while unsafe { ptr::read_volatile(recv_ptr) }.is_reset() {
+                hint::spin_loop();
             }
 
-            // 2. Process the request
-            self.0.mr_send.inner().copy_from_slice(bytes_of(request));
+            *send_pkt = *recv_pkt;
+            recv_pkt.reset();
 
-            // 3. Write send MR to client
-            let local = self.0.mr_send.slice(request.bounds());
-            let remote = self.0.remote_mr.slice(request.bounds());
-            self.0.qp.post_write(&[local], remote, 0, None)?;
+            let bounds = send_pkt.bounds();
+            let local = con.mr_send.slice(&bounds);
+            let remote = con.remote_mr.slice(&bounds);
+            con.qp.post_write(&[local], remote, 0, None)?;
 
-            // 4. Wait for write completion
-            utils::await_completions::<1>(&mut self.0.cq)?;
-
-            // 5. Clear receive MR
-            self.0.mr_recv.inner().fill(0);
+            utils::await_completions::<1>(&mut con.cq)?;
         }
     }
 }
