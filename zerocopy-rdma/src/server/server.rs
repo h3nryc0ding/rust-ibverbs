@@ -1,7 +1,7 @@
-use crate::protocol::EchoPacket;
+use crate::protocol;
+use crate::protocol::{BoundedPacket, DataPacket, MetaPacket};
 use crate::rdma::{connection, utils};
 use crate::utils::json::{read_json, write_json};
-use bytemuck::from_bytes_mut;
 use ibverbs::Context;
 use std::{hint, io, net, ptr};
 
@@ -35,22 +35,34 @@ impl Connected {
         let con = &mut self.connection;
 
         loop {
-            let recv_pkt = from_bytes_mut::<EchoPacket>(con.mr_recv.inner());
-            let send_pkt = from_bytes_mut::<EchoPacket>(con.mr_send.inner());
+            let (recv_data_pkt, recv_meta_pkt, send_data_pkt, send_meta_pkt) = unsafe {
+                // SAFETY: MRs are valid for the lifetime of the request
+                (
+                    &mut *(con.mr_recv_data.inner().as_mut_ptr() as *mut DataPacket),
+                    &mut *(con.mr_recv_meta.inner().as_mut_ptr() as *mut MetaPacket),
+                    &mut *(con.mr_send_data.inner().as_mut_ptr() as *mut DataPacket),
+                    &mut *(con.mr_send_meta.inner().as_mut_ptr() as *mut MetaPacket),
+                )
+            };
 
-            let recv_ptr = recv_pkt as *const EchoPacket;
-            while unsafe { ptr::read_volatile(recv_ptr) }.is_reset() {
+            while unsafe { ptr::read_volatile(recv_meta_pkt) }.is_empty() {
                 hint::spin_loop();
             }
 
-            *send_pkt = *recv_pkt;
-            recv_pkt.reset();
+            recv_meta_pkt.status = protocol::Status::Empty;
+            *send_data_pkt = recv_data_pkt.clone();
+            send_meta_pkt.status = protocol::Status::Ready;
 
-            let bounds = send_pkt.bounds();
-            let local = con.mr_send.slice(&bounds);
-            let remote = con.remote_mr.slice(&bounds);
+            let bounds = send_data_pkt.bounds();
+            let local = con.mr_send_data.slice(&bounds);
+            let remote = con.remote_mr_data.slice(&bounds);
             con.qp.post_write(&[local], remote, 0, None)?;
+            utils::await_completions::<1>(&mut con.cq)?;
 
+            let bounds = send_meta_pkt.bounds();
+            let local = con.mr_send_meta.slice(&bounds);
+            let remote = con.remote_mr_meta.slice(&bounds);
+            con.qp.post_write(&[local], remote, 0, None)?;
             utils::await_completions::<1>(&mut con.cq)?;
         }
     }

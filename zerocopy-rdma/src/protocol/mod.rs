@@ -1,14 +1,17 @@
-use bytemuck::{Pod, Zeroable};
 use std::ops;
 
-#[derive(Debug, Pod, Zeroable, Copy, Clone, PartialEq)]
+pub trait BoundedPacket {
+    fn bounds(&self) -> ops::Range<usize>;
+}
+
+#[derive(Debug, PartialEq, Clone)]
 #[repr(C)]
-pub struct EchoPacket {
+pub struct DataPacket {
     len: usize,
     msg: [u8; 128],
 }
 
-impl EchoPacket {
+impl DataPacket {
     pub fn new(s: &str) -> Self {
         let mut arr = [0; 128];
         let bytes = s.as_bytes();
@@ -20,17 +23,43 @@ impl EchoPacket {
     pub fn as_str(&self) -> &str {
         unsafe { std::str::from_utf8_unchecked(&self.msg[..self.len]) }
     }
+}
 
-    pub const fn bounds(&self) -> ops::Range<usize> {
+impl BoundedPacket for DataPacket {
+    fn bounds(&self) -> ops::Range<usize> {
         // len + msg[0..len]
         0..(size_of::<usize>() + size_of::<u8>() * self.len)
     }
+}
 
-    pub const fn is_reset(&self) -> bool {
-        self.len == 0
+#[derive(Debug, PartialEq)]
+#[repr(C)]
+pub struct MetaPacket {
+    pub status: Status,
+    pub id: usize,
+}
+
+impl MetaPacket {
+    pub fn is_ready(&self) -> bool {
+        self.status == Status::Ready
     }
 
-    pub const fn reset(&mut self) {
-        self.len = 0
+    pub fn is_empty(&self) -> bool {
+        self.status == Status::Empty
     }
+}
+
+impl BoundedPacket for MetaPacket {
+    fn bounds(&self) -> ops::Range<usize> {
+        // status + id
+        0..(size_of::<Status>() + size_of::<usize>())
+    }
+}
+
+#[repr(usize)]
+#[derive(Debug, PartialEq)]
+pub enum Status {
+    Empty = 0,
+    Ready = 1,
+    Error = 2,
 }

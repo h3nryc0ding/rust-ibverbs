@@ -1,3 +1,4 @@
+use crate::protocol::{DataPacket, MetaPacket};
 use ibverbs::{
     CompletionQueue, Context, MemoryRegion, PreparedQueuePair, ProtectionDomain, QueuePair,
     QueuePairEndpoint, RemoteMemoryRegion, ibv_qp_type,
@@ -8,7 +9,8 @@ use std::io;
 #[derive(Serialize, Deserialize)]
 pub struct Endpoints {
     qp: QueuePairEndpoint,
-    mr: RemoteMemoryRegion,
+    mr_data: RemoteMemoryRegion,
+    mr_meta: RemoteMemoryRegion,
 }
 
 pub struct Initialized {
@@ -16,8 +18,10 @@ pub struct Initialized {
     cq: CompletionQueue,
     pd: ProtectionDomain,
     qp: PreparedQueuePair,
-    mr_send: MemoryRegion<Vec<u8>>,
-    mr_recv: MemoryRegion<Vec<u8>>,
+    mr_send_data: MemoryRegion<Vec<u8>>,
+    mr_send_meta: MemoryRegion<Vec<u8>>,
+    mr_recv_data: MemoryRegion<Vec<u8>>,
+    mr_recv_meta: MemoryRegion<Vec<u8>>,
 }
 
 impl Initialized {
@@ -28,22 +32,27 @@ impl Initialized {
             .create_qp(&cq, &cq, ibv_qp_type::IBV_QPT_RC)?
             .allow_remote_rw()
             .build()?;
-        let mr_send = pd.allocate(136)?;
-        let mr_recv = pd.allocate(136)?;
+        let mr_send_data = pd.allocate(size_of::<DataPacket>() + 1)?;
+        let mr_send_meta = pd.allocate(size_of::<MetaPacket>())?;
+        let mr_recv_data = pd.allocate(size_of::<DataPacket>())?;
+        let mr_recv_meta = pd.allocate(size_of::<MetaPacket>())?;
         Ok(Initialized {
             ctx,
             cq,
             pd,
             qp,
-            mr_send,
-            mr_recv,
+            mr_send_data,
+            mr_send_meta,
+            mr_recv_data,
+            mr_recv_meta,
         })
     }
 
     pub fn endpoints(&self) -> io::Result<Endpoints> {
         Ok(Endpoints {
             qp: self.qp.endpoint()?,
-            mr: self.mr_recv.remote(),
+            mr_data: self.mr_recv_data.remote(),
+            mr_meta: self.mr_recv_meta.remote(),
         })
     }
 
@@ -54,9 +63,12 @@ impl Initialized {
             cq: self.cq,
             pd: self.pd,
             qp,
-            mr_send: self.mr_send,
-            mr_recv: self.mr_recv,
-            remote_mr: endpoints.mr,
+            mr_send_data: self.mr_send_data,
+            mr_send_meta: self.mr_send_meta,
+            mr_recv_data: self.mr_recv_data,
+            mr_recv_meta: self.mr_recv_meta,
+            remote_mr_data: endpoints.mr_data,
+            remote_mr_meta: endpoints.mr_meta,
         })
     }
 }
@@ -66,7 +78,10 @@ pub struct Connected {
     pub cq: CompletionQueue,
     pub pd: ProtectionDomain,
     pub qp: QueuePair,
-    pub mr_send: MemoryRegion<Vec<u8>>,
-    pub mr_recv: MemoryRegion<Vec<u8>>,
-    pub remote_mr: RemoteMemoryRegion,
+    pub mr_send_data: MemoryRegion<Vec<u8>>,
+    pub mr_send_meta: MemoryRegion<Vec<u8>>,
+    pub mr_recv_data: MemoryRegion<Vec<u8>>,
+    pub mr_recv_meta: MemoryRegion<Vec<u8>>,
+    pub remote_mr_data: RemoteMemoryRegion,
+    pub remote_mr_meta: RemoteMemoryRegion,
 }

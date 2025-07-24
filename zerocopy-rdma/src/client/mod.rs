@@ -1,6 +1,6 @@
 mod client;
 
-use crate::protocol::EchoPacket;
+use crate::protocol::DataPacket;
 use std::{io, net};
 
 pub fn run(ctx: ibverbs::Context, socket: net::SocketAddr) -> io::Result<()> {
@@ -11,10 +11,14 @@ pub fn run(ctx: ibverbs::Context, socket: net::SocketAddr) -> io::Result<()> {
     println!("Connected to server at {}", socket);
 
     for i in 0..usize::MAX {
-        let req = EchoPacket::new(&format!("{}", i));
-        println!("Sending request: {}", &req.as_str());
+        let req = DataPacket::new(&format!("{}", i));
+        if i % 10_000 == 0 {
+            println!("Sending request: {}", &req.as_str())
+        };
         let res = client.request(&req)?;
-        println!("Sending response: {}", res.as_str());
+        if i % 10_000 == 0 {
+            println!("Sending response: {}", res.as_str());
+        }
     }
 
     Ok(())
