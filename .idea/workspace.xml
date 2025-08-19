@@ -1,0 +1,269 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="ALL" />
+  </component>
+  <component name="CargoProjects">
+    <cargoProject FILE="$PROJECT_DIR$/Cargo.toml">
+      <package file="$PROJECT_DIR$/ibverbs">
+        <enabledFeature name="serde" />
+      </package>
+      <package file="$PROJECT_DIR$/ibverbs-sys">
+        <enabledFeature name="default" />
+      </package>
+      <package file="$PROJECT_DIR$/zerocopy-rdma">
+        <enabledFeature name="default" />
+      </package>
+    </cargoProject>
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="c44155fc-825b-462a-b49d-cf10af3f9ffc" name="Changes" comment="feat: use Arc instead of lifetimes">
+      <change afterPath="$PROJECT_DIR$/zerocopy-rdma/src/client.rs" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/zerocopy-rdma/src/protocol.rs" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/zerocopy-rdma/src/record.rs" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/zerocopy-rdma/src/server.rs" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/zerocopy-rdma/src/transfer/mod.rs" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/zerocopy-rdma/src/transfer/send_recv.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/Cargo.lock" beforeDir="false" afterPath="$PROJECT_DIR$/Cargo.lock" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/ibverbs/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/ibverbs/src/lib.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/zerocopy-rdma/Cargo.toml" beforeDir="false" afterPath="$PROJECT_DIR$/zerocopy-rdma/Cargo.toml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/zerocopy-rdma/src/client/client.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/zerocopy-rdma/src/client/mod.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/zerocopy-rdma/src/lib.rs" beforeDir="false" afterPath="$PROJECT_DIR$/zerocopy-rdma/src/lib.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/zerocopy-rdma/src/main.rs" beforeDir="false" afterPath="$PROJECT_DIR$/zerocopy-rdma/src/main.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/zerocopy-rdma/src/protocol/mod.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/zerocopy-rdma/src/rdma/connection.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/zerocopy-rdma/src/rdma/mod.rs" beforeDir="false" afterPath="$PROJECT_DIR$/zerocopy-rdma/src/rdma/mod.rs" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/zerocopy-rdma/src/server/mod.rs" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/zerocopy-rdma/src/server/server.rs" beforeDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="ExecutionTargetManager" SELECTED_TARGET="RsBuildProfile:test" />
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Rust File in Dumb Mode" />
+        <option value="Rust File" />
+      </list>
+    </option>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+    <option name="ROOT_SYNC" value="DONT_SYNC" />
+  </component>
+  <component name="MacroExpansionManager">
+    <option name="directoryName" value="VGWkinEZ" />
+  </component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 5
+}</component>
+  <component name="ProjectId" id="2xy7CQqCXBntUHHCbImNe8y9Q1m" />
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;Cargo.Run client.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.Run loopback_write.executor&quot;: &quot;Debug&quot;,
+    &quot;Cargo.Run zerocopy.executor&quot;: &quot;Debug&quot;,
+    &quot;Cargo.Test record::tests.executor&quot;: &quot;Run&quot;,
+    &quot;Cargo.client.executor&quot;: &quot;Debug&quot;,
+    &quot;Cargo.server.executor&quot;: &quot;Debug&quot;,
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.rust.reset.selective.auto.import&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;origin/main&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;org.rust.cargo.project.model.PROJECT_DISCOVERY&quot;: &quot;true&quot;,
+    &quot;org.rust.cargo.project.model.impl.CargoExternalSystemProjectAware.subscribe.first.balloon&quot;: &quot;&quot;,
+    &quot;org.rust.first.attach.projects&quot;: &quot;true&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;language.rust.cargo.check&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
+  }
+}</component>
+  <component name="RdControllerToolWindowsLayoutState" isNewUi="true">
+    <layout>
+      <window_info id="Bookmarks" side_tool="true" />
+      <window_info id="Merge Requests" />
+      <window_info id="Backup and Sync History" />
+      <window_info id="Commit_Guest" show_stripe_button="false" />
+      <window_info id="Pull Requests" />
+      <window_info active="true" content_ui="combo" id="Project" order="0" visible="true" weight="0.33020833" />
+      <window_info id="Commit" order="1" weight="0.17951389" />
+      <window_info id="Structure" order="2" side_tool="true" weight="0.25" />
+      <window_info id="Welcome to GitHub Copilot" order="3" />
+      <window_info anchor="bottom" id="Database Changes" />
+      <window_info anchor="bottom" id="TypeScript" />
+      <window_info anchor="bottom" id="TODO" />
+      <window_info anchor="bottom" id="Messages" />
+      <window_info anchor="bottom" id="File Transfer" />
+      <window_info anchor="bottom" id="Find" />
+      <window_info anchor="bottom" id="Version Control" order="0" weight="0.375" />
+      <window_info anchor="bottom" id="Problems" order="1" />
+      <window_info anchor="bottom" id="Problems View" order="2" weight="0.375" />
+      <window_info anchor="bottom" id="Terminal" order="3" weight="0.33055556" />
+      <window_info anchor="bottom" id="Services" order="4" weight="0.33020833" />
+      <window_info anchor="bottom" id="Build" order="5" weight="0.47944444" />
+      <window_info anchor="bottom" id="Debug" order="6" weight="0.47944444" />
+      <window_info anchor="bottom" id="GitHub Copilot MCP Log" order="7" />
+      <window_info anchor="bottom" id="Run" order="8" weight="0.32395834" />
+      <window_info anchor="right" id="make" side_tool="true" />
+      <window_info anchor="right" id="documentation.v2" side_tool="true" />
+      <window_info anchor="right" id="Coverage" side_tool="true" />
+      <window_info anchor="right" content_ui="combo" id="Notifications" order="0" weight="0.25" />
+      <window_info anchor="right" id="AIAssistant" order="1" weight="0.25" />
+      <window_info anchor="right" id="Database" order="2" weight="0.25" />
+      <window_info anchor="right" id="Gradle" order="3" weight="0.25" />
+      <window_info anchor="right" id="Maven" order="4" weight="0.25" />
+      <window_info anchor="right" id="Cargo" order="5" weight="0.2" />
+      <window_info anchor="right" id="RustCargo" order="6" weight="0.2" />
+      <window_info anchor="right" id="github.copilotToolWindow" order="7" />
+      <window_info anchor="right" id="GitHub Copilot Chat" order="8" />
+    </layout>
+  </component>
+  <component name="RecentsManager">
+    <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$" />
+      <recent name="$PROJECT_DIR$/perftest" />
+    </key>
+  </component>
+  <component name="RunManager" selected="Cargo.client">
+    <configuration name="client" type="CargoCommandRunConfiguration" factoryName="Cargo Command" temporary="true">
+      <option name="buildProfileId" value="test" />
+      <option name="command" value="run --package zerocopy --bin zerocopy -- 141.76.47.8" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <configuration name="server" type="CargoCommandRunConfiguration" factoryName="Cargo Command">
+      <option name="command" value="run --package zerocopy --bin zerocopy" />
+      <option name="workingDirectory" value="file://$PROJECT_DIR$" />
+      <envs />
+      <option name="emulateTerminal" value="true" />
+      <option name="channel" value="DEFAULT" />
+      <option name="requiredFeatures" value="true" />
+      <option name="allFeatures" value="false" />
+      <option name="withSudo" value="false" />
+      <option name="buildTarget" value="REMOTE" />
+      <option name="backtrace" value="SHORT" />
+      <option name="isRedirectInput" value="false" />
+      <option name="redirectInputPath" value="" />
+      <method v="2">
+        <option name="CARGO.BUILD_TASK_PROVIDER" enabled="true" />
+      </method>
+    </configuration>
+    <list>
+      <item itemvalue="Cargo.server" />
+      <item itemvalue="Cargo.client" />
+    </list>
+    <recent_temporary>
+      <list>
+        <item itemvalue="Cargo.client" />
+      </list>
+    </recent_temporary>
+  </component>
+  <component name="RustProjectSettings">
+    <option name="toolchainHomeDirectory" value="$USER_HOME$/.cargo/bin" />
+  </component>
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="c44155fc-825b-462a-b49d-cf10af3f9ffc" name="Changes" comment="" />
+      <created>1748898332322</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1748898332322</updated>
+      <workItem from="1748898333797" duration="4854000" />
+      <workItem from="1749064461254" duration="10380000" />
+      <workItem from="1750703825693" duration="14162000" />
+      <workItem from="1750752955144" duration="3443000" />
+      <workItem from="1750762332711" duration="5988000" />
+      <workItem from="1750784783967" duration="6256000" />
+      <workItem from="1750793158132" duration="2459000" />
+      <workItem from="1750796872843" duration="38573000" />
+      <workItem from="1751102413729" duration="7655000" />
+      <workItem from="1751286433228" duration="20075000" />
+      <workItem from="1751385358857" duration="3682000" />
+      <workItem from="1751618877178" duration="42151000" />
+      <workItem from="1755511761662" duration="13425000" />
+      <workItem from="1755532679296" duration="1179000" />
+      <workItem from="1755552080616" duration="4474000" />
+      <workItem from="1755599660262" duration="833000" />
+      <workItem from="1755611856005" duration="12041000" />
+    </task>
+    <task id="LOCAL-00001" summary="feat: use Arc instead of lifetimes">
+      <option name="closed" value="true" />
+      <created>1749072662569</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1749072662569</updated>
+    </task>
+    <option name="localTasksCounter" value="2" />
+    <servers />
+  </component>
+  <component name="TypeScriptGeneratedFilesManager">
+    <option name="version" value="3" />
+  </component>
+  <component name="Vcs.Log.Tabs.Properties">
+    <option name="OPEN_GENERIC_TABS">
+      <map>
+        <entry key="41bbb2da-842b-4943-ba86-81557a0b894e" value="TOOL_WINDOW" />
+      </map>
+    </option>
+    <option name="TAB_STATES">
+      <map>
+        <entry key="41bbb2da-842b-4943-ba86-81557a0b894e">
+          <value>
+            <State />
+          </value>
+        </entry>
+        <entry key="MAIN">
+          <value>
+            <State />
+          </value>
+        </entry>
+      </map>
+    </option>
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="feat: use Arc instead of lifetimes" />
+    <option name="LAST_COMMIT_MESSAGE" value="feat: use Arc instead of lifetimes" />
+  </component>
+  <component name="XDebuggerManager">
+    <breakpoint-manager>
+      <breakpoints>
+        <line-breakpoint enabled="true" type="com.jetbrains.cidr.execution.debugger.OCBreakpointType">
+          <url>file://$PROJECT_DIR$/ibverbs/src/lib.rs</url>
+          <line>67</line>
+          <option name="timeStamp" value="1" />
+        </line-breakpoint>
+      </breakpoints>
+    </breakpoint-manager>
+  </component>
+  <component name="XSLT-Support.FileAssociations.UIState">
+    <expand />
+    <select />
+  </component>
+</project>

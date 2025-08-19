@@ -1,4 +1,6 @@
 use std::{io, net};
+use zerocopy::rdma::Connection;
+use zerocopy::transfer::{Protocol, SendRecvProtocol};
 use zerocopy::{client, server};
 
 #[derive(clap::Parser, Debug)]
@@ -14,7 +16,10 @@ struct Args {
 
 fn main() -> io::Result<()> {
     let args: Args = clap::Parser::parse();
+    run::<SendRecvProtocol>(args)
+}
 
+fn run<P: Protocol>(args: Args) -> io::Result<()> {
     let ctx = ibverbs::devices()?
         .iter()
         .next()
@@ -23,10 +28,12 @@ fn main() -> io::Result<()> {
 
     if let Some(server) = args.server {
         let address = net::SocketAddr::new(server, args.port);
-        client::run(ctx, address)
+        let connection = Connection::connect(ctx, address)?;
+        client::run::<P>(connection)
     } else {
         let address =
             net::SocketAddr::new(net::IpAddr::from(net::Ipv6Addr::UNSPECIFIED), args.port);
-        server::run(ctx, address)
+        let connection = Connection::accept(ctx, address)?;
+        server::run::<P>(connection)
     }
 }

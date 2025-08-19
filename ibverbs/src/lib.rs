@@ -1749,7 +1749,7 @@ impl ProtectionDomain {
     }
 
     /// Registers an already allocated Memory Region (MR) with the given access permissions.
-    pub fn register_with_permissions<T: AsMut<[E]>, E: Sized + Copy + Default>(
+    pub fn register_with_permissions<T: AsMut<[E]>, E: Sized + Copy>(
         &self,
         mut data: T,
         access_flags: ffi::ibv_access_flags,
@@ -1777,10 +1777,7 @@ impl ProtectionDomain {
     }
 
     /// Registers an already allocated Memory Region (MR) with the default access permissions.
-    pub fn register<T: AsMut<[E]>, E: Sized + Copy + Default>(
-        &self,
-        data: T,
-    ) -> io::Result<MemoryRegion<T>> {
+    pub fn register<T: AsMut<[E]>, E: Sized + Copy>(&self, data: T) -> io::Result<MemoryRegion<T>> {
         self.register_with_permissions(data, DEFAULT_ACCESS_FLAGS)
     }
 

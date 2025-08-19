@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
 pub mod client;
-mod protocol;
-mod rdma;
+pub mod rdma;
 pub mod server;
+pub mod transfer;
 mod utils;
+mod protocol;
+mod record;
