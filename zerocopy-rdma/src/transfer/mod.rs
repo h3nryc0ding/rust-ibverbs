@@ -1,24 +1,24 @@
+mod read_write;
 mod send_recv;
 
 use crate::protocol::QueryRequest;
-use crate::rdma::Connection;
 use crate::record::MockRecord;
-use std::io;
+use tokio::{io, net};
 
-pub const RECORDS: usize = 10 * 1024 * 1024; // 10M records ~ 10GB
+pub const RECORDS: usize = 1024 * 1024; // 1M records ~ 1GB
 
 pub trait Client {
-    fn new(c: Connection) -> io::Result<Self>
+    fn new(ctx: ibverbs::Context, stream: &mut net::TcpStream) -> impl Future<Output = io::Result<Self>>
     where
         Self: Sized;
-    fn request(&mut self, r: QueryRequest) -> io::Result<Vec<MockRecord>>;
+    fn request(&mut self, r: QueryRequest) -> impl Future<Output = io::Result<Vec<MockRecord>>>;
 }
 
 pub trait Server {
-    fn new(c: Connection) -> io::Result<Self>
+    fn new(ctx: ibverbs::Context, stream: &mut net::TcpStream) -> impl Future<Output = io::Result<Self>>
     where
         Self: Sized;
-    fn serve(&mut self) -> io::Result<()>;
+    fn serve(&mut self) -> impl Future<Output = io::Result<()>>;
 }
 
 pub trait Protocol {
@@ -26,3 +26,4 @@ pub trait Protocol {
     type Server: Server;
 }
 pub struct SendRecvProtocol;
+pub struct ReadWriteProtocol;

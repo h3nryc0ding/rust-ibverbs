@@ -1,6 +1,8 @@
-use std::{hint, io};
+use tokio::{io, task};
 
-pub fn await_completions<const N: usize>(cq: &mut ibverbs::CompletionQueue) -> io::Result<()> {
+pub async fn await_completions<const N: usize>(
+    cq: &mut ibverbs::CompletionQueue,
+) -> io::Result<()> {
     let mut completions = [ibverbs::ibv_wc::default(); N];
     let mut completed = 0;
 
@@ -13,7 +15,7 @@ pub fn await_completions<const N: usize>(cq: &mut ibverbs::CompletionQueue) -> i
             );
             completed += 1;
         }
-        hint::spin_loop();
+        task::yield_now().await;
     }
     Ok(())
 }

@@ -1,38 +1,24 @@
 use crate::protocol::QueryRequest;
-use crate::rdma::Connection;
 use crate::record::MockRecord;
 use crate::transfer::{Client, Protocol};
-use std::{io, time};
+use tokio::io;
+use tokio::net::TcpStream;
 
 const REQUESTS: usize = 100_000;
 
-pub fn run<P: Protocol>(c: Connection) -> io::Result<()> {
-    let mut client = P::Client::new(c)?;
+pub async fn run<P: Protocol>(dev: ibverbs::Device<'_>, mut stream: TcpStream) -> io::Result<()> {
+    let ctx = dev.open()?;
+    let mut client = P::Client::new(ctx, &mut stream).await?;
 
-    let start = time::Instant::now();
-    let mut records = 0;
     for i in 0..REQUESTS {
         let req = QueryRequest {
-            offset: 0,
-            limit: i as u64,
+            offset: i,
+            count: i + 1,
         };
-        let res = client.request(req)?;
+        let res = client.request(req).await?;
+        assert_eq!(res[0].id, i);
         assert!(res.iter().all(MockRecord::validate));
-        records += i
+        println!("Received {} records in request {i}", res.len());
     }
-    let duration = start.elapsed();
-
-    println!("Sent {REQUESTS} requests in {duration:?}");
-    println!("Average time per request: {:?}", duration / REQUESTS as u32);
-    println!(
-        "Average throughput: {:.2} requests/sec",
-        REQUESTS as f64 / duration.as_secs_f64()
-    );
-    println!(
-        "Average throughput: {:.2} GB/sec",
-        REQUESTS as f64 * records as f64 * size_of::<MockRecord>() as f64
-            / duration.as_secs_f64()
-            / 1_000_000_000.0
-    );
     Ok(())
 }
