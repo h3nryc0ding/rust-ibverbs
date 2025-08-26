@@ -2,7 +2,6 @@ use crate::protocol::QueryRequest;
 use crate::record::MockRecord;
 use crate::transfer::{Client, Protocol, RECORDS, SendRecvProtocol, Server};
 use crate::utils::await_completions;
-use bytemuck::Zeroable;
 use ibverbs::ibv_qp_type::IBV_QPT_RC;
 use ibverbs::{CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -24,7 +23,6 @@ impl Client for SendRecvClient {
         synchronize(stream).await?;
         Ok(Self { qp, cq, recv, send })
     }
-
     async fn request(&mut self, req: QueryRequest) -> io::Result<Vec<MockRecord>> {
         let send = &mut self.send.inner()[0];
         *send = req;
@@ -55,7 +53,6 @@ impl Server for SendRecvServer {
         synchronize(stream).await?;
         Ok(Self { qp, cq, recv, send })
     }
-
     async fn serve(&mut self) -> io::Result<()> {
         loop {
             let local_recv = self.recv.slice(&(0..1 * size_of::<QueryRequest>()));
@@ -70,8 +67,7 @@ impl Server for SendRecvServer {
             );
             unsafe { self.qp.post_send(&[local_send], 0)? }
             await_completions::<1>(&mut self.cq).await?;
-
-            task::yield_now().await;
+            println!("Served request: offset {}, count {}", offset, limit);
         }
     }
 }
@@ -112,7 +108,7 @@ async fn create_server_mrs(
 )> {
     let send_data = task::spawn_blocking(|| (0..RECORDS).map(MockRecord::new).collect()).await?;
     let send = pd.register(send_data)?;
-    let recv_data = vec![QueryRequest::zeroed(); 1];
+    let recv_data = vec![QueryRequest::default(); 1];
     let recv = pd.register(recv_data)?;
     println!("MRs created");
     Ok((recv, send))
@@ -124,9 +120,9 @@ async fn create_client_mrs(
     MemoryRegion<Vec<MockRecord>>,
     MemoryRegion<Vec<QueryRequest>>,
 )> {
-    let recv_data = vec![MockRecord::zeroed(); RECORDS];
+    let recv_data = vec![MockRecord::default(); RECORDS];
     let recv = pd.register(recv_data)?;
-    let send_data = vec![QueryRequest::zeroed(); 1];
+    let send_data = vec![QueryRequest::default(); 1];
     let send = pd.register(send_data)?;
     println!("MRs created");
     Ok((recv, send))

@@ -5,3 +5,6 @@ members = [
     "ibverbs-sys",
     "zerocopy-rdma",
 ]
+
+[profile.release]
+debug = true

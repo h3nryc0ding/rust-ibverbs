@@ -1,18 +1,16 @@
-use bytemuck::{Pod, Zeroable};
-use md5::{Digest, Md5};
 use std::usize;
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Pod, Zeroable)]
-pub struct MockRecord {
+#[derive(Debug, Copy, Clone)]
+pub struct MockRecord<const N: usize = 1024> {
     pub id: usize,
-    pub checksum: usize,
-    pub payload: [u8; 1024],
+    pub checksum: u32,
+    pub payload: [u8; N],
 }
 
-impl MockRecord {
+impl<const N: usize> MockRecord<N> {
     pub fn new(id: usize) -> Self {
-        let payload = [id as u8; 1024];
+        let payload = [id as u8; N];
         let checksum = Self::checksum(&payload);
         MockRecord {
             id,
@@ -21,17 +19,23 @@ impl MockRecord {
         }
     }
 
-    fn checksum(payload: &[u8; 1024]) -> usize {
-        let mut hasher = Md5::new();
-        hasher.update(payload);
-        let res = hasher.finalize();
-
-        let mut arr = [0u8; size_of::<usize>()];
-        arr.copy_from_slice(&res[..size_of::<usize>()]);
-        usize::from_le_bytes(arr)
+    fn checksum(payload: &[u8; N]) -> u32 {
+        crc32fast::hash(payload)
     }
 
     pub fn validate(&self) -> bool {
         Self::checksum(&self.payload) == self.checksum
+    }
+}
+
+impl<const N: usize> Default for MockRecord<N> {
+    fn default() -> Self {
+        let payload = [0; N];
+        let checksum = Self::checksum(&payload);
+        Self {
+            id: 0,
+            checksum,
+            payload,
+        }
     }
 }
