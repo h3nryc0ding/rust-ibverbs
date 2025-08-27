@@ -1,17 +1,24 @@
 use crate::transfer::{Protocol, Server};
-use tokio::io;
 use tokio::net::TcpListener;
+use tokio::{io, task};
 
-pub async fn run<P: Protocol>(dev: ibverbs::Device<'_>, listener: TcpListener) -> io::Result<()> {
+pub async fn run<'dev, P: Protocol>(
+    dev: ibverbs::Device<'dev>,
+    listener: TcpListener,
+) -> io::Result<()>
+where
+    P::Server: Sync + Send,
+{
     println!("Server is listening for connections...");
     loop {
-        let (mut stream, addr) = listener.accept().await?;
+        let (stream, addr) = listener.accept().await?;
         println!("Accepted new connection from {}", addr);
 
         let ctx = dev.open()?;
-        let mut server = P::Server::new(ctx, &mut stream).await?;
-        println!("Server session for {} is now running.", addr);
-
-        server.serve().await?;
+        task::spawn(async move {
+            let mut server = P::Server::new(ctx, stream).await.unwrap();
+            println!("Server session for {} is now running.", addr);
+            server.serve().await.unwrap();
+        });
     }
 }

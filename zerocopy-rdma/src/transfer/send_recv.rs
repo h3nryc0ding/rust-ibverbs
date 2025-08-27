@@ -1,40 +1,55 @@
+use crate::memory::{BufferGuard, PoolManager};
 use crate::protocol::QueryRequest;
 use crate::record::MockRecord;
 use crate::transfer::{Client, Protocol, RECORDS, SendRecvProtocol, Server};
 use crate::utils::await_completions;
 use ibverbs::ibv_qp_type::IBV_QPT_RC;
 use ibverbs::{CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair};
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 use tokio::{io, task};
 
+#[derive(Clone)]
 pub struct SendRecvClient {
-    qp: QueuePair,
-    cq: CompletionQueue,
+    qp: Arc<Mutex<QueuePair>>,
+    cq: Arc<Mutex<CompletionQueue>>,
 
-    recv: MemoryRegion<Vec<MockRecord>>,
-    send: MemoryRegion<Vec<QueryRequest>>,
+    pool: PoolManager<MockRecord, 2, RECORDS>,
+    send: Arc<Mutex<MemoryRegion<Vec<QueryRequest>>>>,
 }
 
 impl Client for SendRecvClient {
     async fn new(ctx: Context, stream: &mut TcpStream) -> io::Result<Self> {
         let (pd, cq, qp) = perform_rdma_handshake(&ctx, stream).await?;
-        let (recv, send) = create_client_mrs(&pd).await?;
+        let pool = PoolManager::new(&pd)?;
+        let send_data = vec![QueryRequest::default(); 1];
+        let send = pd.register(send_data)?;
         synchronize(stream).await?;
-        Ok(Self { qp, cq, recv, send })
+        Ok(Self {
+            qp: Arc::new(Mutex::new(qp)),
+            cq: Arc::new(Mutex::new(cq)),
+            pool,
+            send: Arc::new(Mutex::new(send)),
+        })
     }
-    async fn request(&mut self, req: QueryRequest) -> io::Result<Vec<MockRecord>> {
-        let send = &mut self.send.inner()[0];
-        *send = req;
+    async fn request(&mut self, req: QueryRequest) -> io::Result<BufferGuard<MockRecord>> {
+        let buf = self.pool.acquire().await?;
 
-        let local_recv = self.recv.slice(&(0..RECORDS * size_of::<MockRecord>()));
-        unsafe { self.qp.post_receive(&[local_recv], 0)? }
+        let local_recv = buf.mr().slice(&(0..RECORDS * size_of::<MockRecord>()));
+        unsafe { self.qp.lock().await.post_receive(&[local_recv], 0)? }
+        {
+            let mut send = self.send.lock().await;
+            send.inner_mut()[0] = req;
+            let local_send = send.slice(&(0..1 * size_of::<QueryRequest>()));
+            unsafe { self.qp.lock().await.post_send(&[local_send], 0)? }
+        }
 
-        let local_send = self.send.slice(&(0..1 * size_of::<QueryRequest>()));
-        unsafe { self.qp.post_send(&[local_send], 0)? }
-        await_completions::<2>(&mut self.cq).await?;
+        let cq = &mut self.cq.lock().await;
+        await_completions::<2>(cq).await?;
 
-        Ok(self.recv.inner()[0..req.count].to_vec())
+        Ok(buf)
     }
 }
 
@@ -47,10 +62,10 @@ pub struct SendRecvServer {
 }
 
 impl Server for SendRecvServer {
-    async fn new(ctx: Context, stream: &mut TcpStream) -> io::Result<Self> {
-        let (pd, cq, qp) = perform_rdma_handshake(&ctx, stream).await?;
+    async fn new(ctx: Context, mut stream: TcpStream) -> io::Result<Self> {
+        let (pd, cq, qp) = perform_rdma_handshake(&ctx, &mut stream).await?;
         let (recv, send) = create_server_mrs(&pd).await?;
-        synchronize(stream).await?;
+        synchronize(&mut stream).await?;
         Ok(Self { qp, cq, recv, send })
     }
     async fn serve(&mut self) -> io::Result<()> {
@@ -113,21 +128,6 @@ async fn create_server_mrs(
     println!("MRs created");
     Ok((recv, send))
 }
-
-async fn create_client_mrs(
-    pd: &ProtectionDomain,
-) -> io::Result<(
-    MemoryRegion<Vec<MockRecord>>,
-    MemoryRegion<Vec<QueryRequest>>,
-)> {
-    let recv_data = vec![MockRecord::default(); RECORDS];
-    let recv = pd.register(recv_data)?;
-    let send_data = vec![QueryRequest::default(); 1];
-    let send = pd.register(send_data)?;
-    println!("MRs created");
-    Ok((recv, send))
-}
-
 async fn synchronize(stream: &mut TcpStream) -> io::Result<()> {
     stream.write_all(b"READY\n").await?;
     let mut buf = [0u8; 16];

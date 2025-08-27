@@ -6,3 +6,4 @@ mod record;
 pub mod server;
 pub mod transfer;
 mod utils;
+mod memory;

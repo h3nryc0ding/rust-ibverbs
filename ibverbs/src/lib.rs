@@ -1513,7 +1513,12 @@ impl<T> MemoryRegion<T> {
     }
 
     /// Get inner data.
-    pub fn inner(&mut self) -> &mut T {
+    pub fn inner(&self) -> &T {
+        &self.data
+    }
+
+    /// Get mutable inner data.
+    pub fn inner_mut(&mut self) -> &mut T {
         &mut self.data
     }
 
