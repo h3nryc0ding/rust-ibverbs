@@ -6,7 +6,7 @@ use tokio::io;
 use tokio::net::TcpStream;
 
 const REQUESTS: usize = 10;
-const CONCURRENT_REQUESTS: usize = 2;
+const CONCURRENT_REQUESTS: usize = 1;
 
 pub async fn run<P: Protocol>(dev: ibverbs::Device<'_>, mut stream: TcpStream) -> io::Result<()>
 where
@@ -22,20 +22,13 @@ where
         })
         .map(|r| {
             let mut client = client.clone();
-            println!("Client cloned");
-            async move {
-                println!("Requesting records {} to {}", r.offset, r.offset + r.count);
-                client.request(r).await
-            }
+            async move { client.request(r).await }
         })
         .buffer_unordered(CONCURRENT_REQUESTS)
         .for_each_concurrent(None, |res| async {
             match res {
-                Ok(records) => {
-                    println!("Received {} records", records.len());
-                    assert!(records.iter().all(MockRecord::validate))
-                },
-                Err(e) => eprintln!("Request failed: {}", e),
+                Ok(records) => assert!(records.iter().all(MockRecord::validate)),
+                Err(e) => panic!("Request failed: {}", e),
             }
         })
         .await;

@@ -1,7 +1,9 @@
 use crate::transfer::{Protocol, Server};
 use tokio::net::TcpListener;
 use tokio::{io, task};
+use tracing::{instrument, span};
 
+#[instrument(skip_all, fields(socket = %listener.local_addr().unwrap()))]
 pub async fn run<'dev, P: Protocol>(
     dev: ibverbs::Device<'dev>,
     listener: TcpListener,
@@ -9,15 +11,13 @@ pub async fn run<'dev, P: Protocol>(
 where
     P::Server: Sync + Send,
 {
-    println!("Server is listening for connections...");
     loop {
         let (stream, addr) = listener.accept().await?;
-        println!("Accepted new connection from {}", addr);
 
         let ctx = dev.open()?;
         task::spawn(async move {
+            let _ = span!(tracing::Level::INFO, "client", %addr);
             let mut server = P::Server::new(ctx, stream).await.unwrap();
-            println!("Server session for {} is now running.", addr);
             server.serve().await.unwrap();
         });
     }

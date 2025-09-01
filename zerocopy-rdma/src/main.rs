@@ -28,8 +28,13 @@ enum Protocol {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
-    let args: Args = clap::Parser::parse();
+    tracing_subscriber::fmt()
+        .with_thread_ids(true)
+        .with_max_level(tracing::Level::DEBUG)
+        .compact()
+        .init();
 
+    let args: Args = clap::Parser::parse();
     match args.protocol {
         Protocol::SendRecv => run::<SendRecvProtocol>(args).await,
         Protocol::ReadWrite => run::<ReadWriteProtocol>(args).await,

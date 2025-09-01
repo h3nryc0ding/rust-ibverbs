@@ -1,8 +1,9 @@
-use ibverbs::{MemoryRegion, ProtectionDomain};
-use std::ops::{Deref, DerefMut};
+use ibverbs::{LocalMemorySlice, MemoryRegion, ProtectionDomain};
+use std::ops::{Deref, DerefMut, RangeBounds};
 use std::sync::Arc;
 use tokio::io;
 use tokio::sync::{Mutex, mpsc};
+use tracing::{info, instrument};
 
 type MR<D> = MemoryRegion<Vec<D>>;
 
@@ -12,14 +13,33 @@ pub struct BufferGuard<D> {
 }
 
 impl<D> BufferGuard<D> {
+    #[instrument(skip_all)]
+    fn new(mr: MR<D>, tx: mpsc::Sender<MR<D>>) -> Self {
+        info!(addr = ?mr.inner().as_ptr());
+        Self { mr: Some(mr), tx }
+    }
     pub fn mr(&self) -> &MR<D> {
         self.mr.as_ref().unwrap()
+    }
+
+    pub fn inner(&self) -> &[D] {
+        self.mr.as_ref().unwrap().inner().as_slice()
+    }
+
+    pub fn inner_mut(&mut self) -> &mut [D] {
+        self.mr.as_mut().unwrap().inner_mut().as_mut_slice()
+    }
+
+    pub fn slice(&self, bounds: impl RangeBounds<usize>) -> LocalMemorySlice {
+        self.mr.as_ref().unwrap().slice(&bounds)
     }
 }
 
 impl<D> Drop for BufferGuard<D> {
+    #[instrument(skip_all)]
     fn drop(&mut self) {
         if let Some(mr) = self.mr.take() {
+            info!(addr = ?mr.inner().as_ptr());
             self.tx.try_send(mr).ok();
         }
     }
@@ -63,10 +83,7 @@ impl<D: Default + Clone + Copy, const P_SIZE: usize, const B_SIZE: usize>
 
     pub async fn acquire(&mut self) -> io::Result<BufferGuard<D>> {
         match self.rx.lock().await.recv().await {
-            Some(mr) => Ok(BufferGuard {
-                mr: Some(mr),
-                tx: self.tx.clone(),
-            }),
+            Some(mr) => Ok(BufferGuard::new(mr, self.tx.clone())),
             None => Err(io::Error::new(
                 io::ErrorKind::Other,
                 "Failed to acquire buffer",
