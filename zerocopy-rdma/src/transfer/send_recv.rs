@@ -12,7 +12,7 @@ use tokio::sync::Mutex;
 use tokio::{io, task};
 use tracing::instrument;
 
-const CONCURRENCY: usize = 3;
+const CONCURRENCY: usize = 10;
 
 #[derive(Clone)]
 pub struct SendRecvClient {
@@ -40,7 +40,7 @@ impl Client for SendRecvClient {
         })
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip_all, name = "Client::request")]
     async fn request(&mut self, req: QueryRequest) -> io::Result<BufferGuard<MockRecord>> {
         let mut send = self.send.acquire().await?;
         let recv = self.recv.acquire().await?;
@@ -80,7 +80,7 @@ pub struct SendRecvServer {
 }
 
 impl Server for SendRecvServer {
-    #[instrument(skip(ctx, stream), fields(peer = %stream.peer_addr().unwrap()))]
+    #[instrument(skip_all, fields(peer = %stream.peer_addr().unwrap()))]
     async fn new(ctx: Context, mut stream: TcpStream) -> io::Result<Self> {
         let (pd, cq, qp) = perform_rdma_handshake(&ctx, &mut stream).await?;
         let cq = AsyncCompletionQueue::new(cq);

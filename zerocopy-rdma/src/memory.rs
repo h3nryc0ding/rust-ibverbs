@@ -3,7 +3,7 @@ use std::ops::{Deref, DerefMut, RangeBounds};
 use std::sync::Arc;
 use tokio::io;
 use tokio::sync::{Mutex, mpsc};
-use tracing::{info, instrument};
+use tracing::{debug, instrument};
 
 type MR<D> = MemoryRegion<Vec<D>>;
 
@@ -13,9 +13,9 @@ pub struct BufferGuard<D> {
 }
 
 impl<D> BufferGuard<D> {
-    #[instrument(skip_all)]
+    #[instrument(skip_all, name = "BufferGuard::new")]
     fn new(mr: MR<D>, tx: mpsc::Sender<MR<D>>) -> Self {
-        info!(addr = ?mr.inner().as_ptr());
+        debug!(addr = ?mr.inner().as_ptr());
         Self { mr: Some(mr), tx }
     }
     pub fn mr(&self) -> &MR<D> {
@@ -36,10 +36,10 @@ impl<D> BufferGuard<D> {
 }
 
 impl<D> Drop for BufferGuard<D> {
-    #[instrument(skip_all)]
+    #[instrument(skip_all, name = "BufferGuard::drop")]
     fn drop(&mut self) {
         if let Some(mr) = self.mr.take() {
-            info!(addr = ?mr.inner().as_ptr());
+            debug!(addr = ?mr.inner().as_ptr());
             self.tx.try_send(mr).ok();
         }
     }
@@ -81,6 +81,7 @@ impl<D: Default + Clone + Copy, const P_SIZE: usize, const B_SIZE: usize>
         })
     }
 
+    #[instrument(skip_all, name = "PoolManager::acquire")]
     pub async fn acquire(&mut self) -> io::Result<BufferGuard<D>> {
         match self.rx.lock().await.recv().await {
             Some(mr) => Ok(BufferGuard::new(mr, self.tx.clone())),

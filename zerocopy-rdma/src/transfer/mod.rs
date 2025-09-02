@@ -2,12 +2,11 @@ mod read_write;
 mod send_recv;
 
 use crate::memory::BufferGuard;
-use crate::protocol::QueryRequest;
 use crate::record::MockRecord;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::TcpStream;
 use tokio::{io, net};
 use tracing::instrument;
+use crate::protocol::QueryRequest;
 
 pub const RECORDS: usize = 512 * 1024; // 0.5M records ~ 0.5GB
 
@@ -42,7 +41,7 @@ pub struct SendRecvProtocol;
 pub struct ReadWriteProtocol;
 
 #[instrument(skip_all, fields(peer = %stream.peer_addr().unwrap()))]
-async fn synchronize(stream: &mut TcpStream) -> io::Result<()> {
+async fn synchronize(stream: &mut net::TcpStream) -> io::Result<()> {
     const READY: &[u8] = b"READY\n";
     stream.write_all(READY).await?;
     let mut buf = [0u8; size_of_val(READY)];

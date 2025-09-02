@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use tokio::net::TcpStream;
 use tokio::{io, net};
+use tracing::Level;
 use zerocopy::transfer::{ReadWriteProtocol, SendRecvProtocol};
 use zerocopy::{client, server, transfer};
 
@@ -18,6 +19,10 @@ struct Args {
     /// The RDMA protocol to use.
     #[arg(long, value_enum, default_value_t = Protocol::SendRecv)]
     protocol: Protocol,
+
+    /// The log level to use.
+    #[arg(long, default_value_t = Level::DEBUG)]
+    log: Level
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -28,13 +33,14 @@ enum Protocol {
 
 #[tokio::main]
 async fn main() -> io::Result<()> {
+    let args: Args = clap::Parser::parse();
+
     tracing_subscriber::fmt()
         .with_thread_ids(true)
-        .with_max_level(tracing::Level::DEBUG)
+        .with_max_level(args.log)
         .compact()
         .init();
 
-    let args: Args = clap::Parser::parse();
     match args.protocol {
         Protocol::SendRecv => run::<SendRecvProtocol>(args).await,
         Protocol::ReadWrite => run::<ReadWriteProtocol>(args).await,
