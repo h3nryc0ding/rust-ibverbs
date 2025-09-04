@@ -105,7 +105,7 @@ async fn polling_loop(
         for completion in completed {
             let wr_id = completion.wr_id();
 
-            let span = debug_span!("WC",wr_id);
+            let span = debug_span!("WC", wr_id);
             async {
                 debug!("Received");
                 if let Some(sender) = pending.lock().await.remove(&wr_id) {

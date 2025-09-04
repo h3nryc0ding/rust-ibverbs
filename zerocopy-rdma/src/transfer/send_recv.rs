@@ -1,15 +1,17 @@
 use crate::async_cq::AsyncCompletionQueue;
-use crate::memory::{BufferGuard, PoolManager};
-use crate::protocol::QueryRequest;
+use crate::memory::jit::JustInTimeProvider;
+use crate::memory::pool::PoolProvider;
+use crate::memory::{Handle, Provider};
+use crate::protocol::{QueryRequest, QueryResponse};
 use crate::record::MockRecord;
-use crate::transfer::{Client, Protocol, RECORDS, SendRecvProtocol, Server, synchronize};
+use crate::transfer::{Client, Protocol, SendRecvProtocol, Server, synchronize};
 use ibverbs::ibv_qp_type::IBV_QPT_RC;
 use ibverbs::{CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair};
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
-use tokio::{io, task};
+use tokio::io;
 use tracing::instrument;
 
 const CONCURRENCY: usize = 10;
@@ -19,8 +21,8 @@ pub struct SendRecvClient {
     qp: Arc<Mutex<QueuePair>>,
     cq: AsyncCompletionQueue,
 
-    recv: PoolManager<MockRecord, CONCURRENCY, RECORDS>,
-    send: PoolManager<QueryRequest, CONCURRENCY, 1>,
+    send: JustInTimeProvider<QueryRequest>,
+    recv: PoolProvider<QueryResponse>,
 }
 
 impl Client for SendRecvClient {
@@ -28,8 +30,8 @@ impl Client for SendRecvClient {
         let (pd, cq, qp) = perform_rdma_handshake(&ctx, stream).await?;
         let cq = AsyncCompletionQueue::new(cq);
 
-        let recv = PoolManager::new(&pd)?;
-        let send = PoolManager::new(&pd)?;
+        let recv = PoolProvider::new(&pd, CONCURRENCY)?;
+        let send = JustInTimeProvider::new(pd);
 
         synchronize(stream).await?;
         Ok(Self {
@@ -41,27 +43,20 @@ impl Client for SendRecvClient {
     }
 
     #[instrument(skip_all, name = "Client::request")]
-    async fn request(&mut self, req: QueryRequest) -> io::Result<BufferGuard<MockRecord>> {
-        let mut send = self.send.acquire().await?;
-        let recv = self.recv.acquire().await?;
+    async fn request(&mut self, req: QueryRequest) -> io::Result<Handle<QueryResponse>> {
+        let mut send = self.send.acquire_mr().await?;
+        let recv = self.recv.acquire_mr().await?;
 
         let res = {
-            send[0] = req;
+            *send = req;
 
             let recv = {
                 let mut qp = self.qp.lock().await;
-                self.cq
-                    .post_receive(
-                        &mut qp,
-                        &[recv.slice(0..req.count * size_of::<MockRecord>())],
-                    )
-                    .await?
+                self.cq.post_receive(&mut qp, &[recv.slice()]).await?
             };
             {
                 let mut qp = self.qp.lock().await;
-                self.cq
-                    .post_send(&mut qp, &[send.slice(0..size_of::<QueryRequest>())])
-                    .await?;
+                self.cq.post_send(&mut qp, &[send.slice()]).await?;
             }
             recv
         };
@@ -75,8 +70,8 @@ pub struct SendRecvServer {
     qp: Arc<Mutex<QueuePair>>,
     cq: AsyncCompletionQueue,
 
-    recv: PoolManager<QueryRequest, CONCURRENCY, 1>,
-    send: Arc<MemoryRegion<Vec<MockRecord>>>,
+    send: Arc<MemoryRegion<QueryResponse>>,
+    recv: PoolProvider<QueryRequest>,
 }
 
 impl Server for SendRecvServer {
@@ -84,10 +79,8 @@ impl Server for SendRecvServer {
     async fn new(ctx: Context, mut stream: TcpStream) -> io::Result<Self> {
         let (pd, cq, qp) = perform_rdma_handshake(&ctx, &mut stream).await?;
         let cq = AsyncCompletionQueue::new(cq);
-        let send_data =
-            task::spawn_blocking(|| (0..RECORDS).map(MockRecord::new).collect()).await?;
-        let send = pd.register(send_data)?;
-        let recv = PoolManager::new(&pd)?;
+        let send = pd.allocate()?;
+        let recv = PoolProvider::new(&pd, CONCURRENCY)?;
         synchronize(&mut stream).await?;
         Ok(Self {
             qp: Arc::new(Mutex::new(qp)),
@@ -100,25 +93,23 @@ impl Server for SendRecvServer {
     #[instrument(skip(self))]
     async fn serve(&mut self) -> io::Result<()> {
         loop {
-            let recv = self.recv.acquire().await?;
+            let recv = self.recv.acquire_mr().await?;
 
             let recv_waiter = {
-                let slice = recv.slice(0..size_of::<QueryRequest>());
                 let mut qp = self.qp.lock().await;
-                self.cq.post_receive(&mut qp, &[slice]).await?
+                self.cq.post_receive(&mut qp, &[recv.slice()]).await?
             };
 
             let send = self.send.clone();
             let qp = self.qp.clone();
             let mut cq = self.cq.clone();
             tokio::spawn(async move {
-                let recv = recv;
                 recv_waiter.await.unwrap();
-                let req = recv[0];
+                let req = recv;
 
                 let slice = send.slice(
-                    &(req.offset * size_of::<MockRecord>()
-                        ..(req.offset + req.count) * size_of::<MockRecord>()),
+                    req.offset * size_of::<MockRecord>()
+                        ..(req.offset + req.count) * size_of::<MockRecord>(),
                 );
                 let send_waiter = {
                     let mut qp = qp.lock().await;

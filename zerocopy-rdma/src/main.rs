@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use tokio::net::TcpStream;
 use tokio::{io, net};
 use tracing::Level;
-use zerocopy::transfer::{ReadWriteProtocol, SendRecvProtocol};
+use zerocopy::transfer::{SendRecvProtocol, WriteProtocol};
 use zerocopy::{client, server, transfer};
 
 #[derive(clap::Parser, Debug)]
@@ -22,13 +22,13 @@ struct Args {
 
     /// The log level to use.
     #[arg(long, default_value_t = Level::DEBUG)]
-    log: Level
+    log: Level,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum Protocol {
     SendRecv,
-    ReadWrite,
+    Write,
 }
 
 #[tokio::main]
@@ -43,7 +43,7 @@ async fn main() -> io::Result<()> {
 
     match args.protocol {
         Protocol::SendRecv => run::<SendRecvProtocol>(args).await,
-        Protocol::ReadWrite => run::<ReadWriteProtocol>(args).await,
+        Protocol::Write => run::<WriteProtocol>(args).await,
     }
 }
 

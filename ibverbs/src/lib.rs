@@ -60,7 +60,6 @@
 //! [RDMAmojo]: http://www.rdmamojo.com/
 //! [1]: http://www.rdmamojo.com/2012/05/18/libibverbs/
 
-#![deny(missing_docs)]
 #![warn(rust_2018_idioms)]
 // avoid warnings about RDMAmojo, iWARP, InfiniBand, etc. not being in backticks
 #![allow(clippy::doc_markdown)]
@@ -68,7 +67,7 @@
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::io;
-use std::ops::RangeBounds;
+use std::ops::{Deref, DerefMut, RangeBounds};
 use std::os::fd::BorrowedFd;
 use std::os::raw::c_void;
 use std::ptr;
@@ -1489,7 +1488,7 @@ impl PreparedQueuePair {
 pub struct MemoryRegion<T> {
     _pd: Arc<ProtectionDomainInner>,
     mr: *mut ffi::ibv_mr,
-    data: T,
+    data: Box<T>,
 }
 
 unsafe impl<T> Send for MemoryRegion<T> {}
@@ -1512,20 +1511,10 @@ impl<T> MemoryRegion<T> {
         }
     }
 
-    /// Get inner data.
-    pub fn inner(&self) -> &T {
-        &self.data
-    }
-
-    /// Get mutable inner data.
-    pub fn inner_mut(&mut self) -> &mut T {
-        &mut self.data
-    }
-
     /// Make a subslice of this memory region.
-    pub fn slice(&self, bounds: &impl RangeBounds<usize>) -> LocalMemorySlice {
+    pub fn slice(&self, bounds: impl RangeBounds<usize>) -> LocalMemorySlice {
         let (addr, length) = calc_addr_len(
-            bounds,
+            &bounds,
             unsafe { *self.mr }.addr as u64,
             unsafe { *self.mr }.length,
         );
@@ -1535,6 +1524,20 @@ impl<T> MemoryRegion<T> {
             lkey: unsafe { *self.mr }.lkey,
         };
         LocalMemorySlice { _sge: sge }
+    }
+}
+
+impl<T> Deref for MemoryRegion<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl<T> DerefMut for MemoryRegion<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.data
     }
 }
 
@@ -1674,145 +1677,24 @@ impl ProtectionDomain {
             1,
         ))
     }
-
-    /// Allocates and registers a Memory Region (MR) associated with this `ProtectionDomain`.
-    ///
-    /// This process allows the RDMA device to read and write data to the allocated memory. Only
-    /// registered memory can be sent from and received to by `QueuePair`s. Performing this
-    /// registration takes some time, so performing memory registration isn't recommended in the
-    /// data path, when fast response is required.
-    ///
-    /// Every successful registration will result with a MR which has unique (within a specific
-    /// RDMA device) `lkey` and `rkey` values. These keys must be communicated to the other end's
-    /// `QueuePair` for direct memory access.
-    ///
-    /// The maximum size of the block that can be registered is limited to
-    /// `device_attr.max_mr_size`. There isn't any way to know what is the total size of memory
-    /// that can be registered for a specific device.
-    ///
-    /// `allocate_with_permissions` accepts a set of permission flags, with local read access
-    /// always enabled for the Memory Region (MR).
-    ///
-    /// # Panics
-    ///
-    /// Panics if the size of the memory region zero bytes, which can occur either if `n` is 0, or
-    /// if `mem::size_of::<T>()` is 0.
-    ///
-    /// # Errors
-    ///
-    ///  - `EINVAL`: Invalid access value.
-    ///  - `ENOMEM`: Not enough resources (either in operating system or in RDMA device) to
-    ///    complete this operation.
-    pub fn allocate_with_permissions(
-        &self,
-        n: usize,
-        access_flags: ffi::ibv_access_flags,
-    ) -> io::Result<MemoryRegion<Vec<u8>>> {
-        assert!(n > 0);
-        let data = vec![0; n];
-        self.register_with_permissions(data, access_flags)
+    pub fn allocate<T: Default>(&self) -> io::Result<MemoryRegion<T>> {
+        let data = Box::new(T::default());
+        self.register(data)
     }
 
-    /// Allocates and registers a Memory Region (MR) associated with this `ProtectionDomain`.
-    ///
-    /// This process allows the RDMA device to read and write data to the allocated memory. Only
-    /// registered memory can be sent from and received to by `QueuePair`s. Performing this
-    /// registration takes some time, so performing memory registration isn't recommended in the
-    /// data path, when fast response is required.
-    ///
-    /// Every successful registration will result with a MR which has unique (within a specific
-    /// RDMA device) `lkey` and `rkey` values. These keys must be communicated to the other end's
-    /// `QueuePair` for direct memory access.
-    ///
-    /// The maximum size of the block that can be registered is limited to
-    /// `device_attr.max_mr_size`. There isn't any way to know what is the total size of memory
-    /// that can be registered for a specific device.
-    ///
-    /// `allocate` currently sets the following permissions for each new `MemoryRegion`:
-    ///
-    ///  - `IBV_ACCESS_LOCAL_WRITE`: Enables Local Write Access
-    ///  - `IBV_ACCESS_REMOTE_WRITE`: Enables Remote Write Access
-    ///  - `IBV_ACCESS_REMOTE_READ`: Enables Remote Read Access
-    ///  - `IBV_ACCESS_REMOTE_ATOMIC`: Enables Remote Atomic Operation Access (if supported)
-    ///
-    /// Local read access is always enabled for the MR. For more fine-grained control over
-    /// permissions, see `allocate_with_permissions`.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the size of the memory region zero bytes, which can occur either if `n` is 0, or
-    /// if `mem::size_of::<T>()` is 0.
-    ///
-    /// # Errors
-    ///
-    ///  - `EINVAL`: Invalid access value.
-    ///  - `ENOMEM`: Not enough resources (either in operating system or in RDMA device) to
-    ///    complete this operation.
-    pub fn allocate(&self, n: usize) -> io::Result<MemoryRegion<Vec<u8>>> {
-        let access_flags = DEFAULT_ACCESS_FLAGS;
-        self.allocate_with_permissions(n, access_flags)
-    }
-
-    /// Registers an already allocated Memory Region (MR) with the given access permissions.
-    pub fn register_with_permissions<T: AsMut<[E]>, E: Sized + Copy>(
-        &self,
-        mut data: T,
-        access_flags: ffi::ibv_access_flags,
-    ) -> io::Result<MemoryRegion<T>> {
-        let len = std::mem::size_of_val(data.as_mut());
-        assert!(std::mem::size_of::<T>() > 0);
-        let mr = unsafe {
-            ffi::ibv_reg_mr(
-                self.inner.pd,
-                data.as_mut().as_mut_ptr() as *mut c_void,
-                len,
-                access_flags.0 as i32,
-            )
-        };
-        // ibv_reg_mr()  returns  a  pointer to the registered MR, or NULL if the request fails.
+    pub fn register<T>(&self, data: Box<T>) -> io::Result<MemoryRegion<T>> {
+        let len = size_of::<T>();
+        assert!(len > 0);
+        let addr = Box::into_raw(data) as *mut c_void;
+        let mr =
+            unsafe { ffi::ibv_reg_mr(self.inner.pd, addr, len, DEFAULT_ACCESS_FLAGS.0 as i32) };
         if mr.is_null() {
             Err(io::Error::last_os_error())
         } else {
             Ok(MemoryRegion {
                 _pd: self.inner.clone(),
                 mr,
-                data,
-            })
-        }
-    }
-
-    /// Registers an already allocated Memory Region (MR) with the default access permissions.
-    pub fn register<T: AsMut<[E]>, E: Sized + Copy>(&self, data: T) -> io::Result<MemoryRegion<T>> {
-        self.register_with_permissions(data, DEFAULT_ACCESS_FLAGS)
-    }
-
-    /// Registers an already allocated DMA-BUF memory region (MR) associated with this `ProtectionDomain`.
-    /// https://man7.org/linux/man-pages/man3/ibv_reg_mr.3.html
-    ///
-    /// # Arguments
-    ///
-    /// * `fd` - The file descriptor of the DMA-BUF to be registered. This must refer to an already allocated buffer.
-    /// * `iova` - The IO virtual address (IOVA) at which the DMA-BUF will be made accessible to the RDMA device.
-    /// * `len` - The size in bytes of the memory region to be registered. This must be aligned to page size.
-    pub fn register_dmabuf(
-        &self,
-        fd: i32,
-        iova: u64,
-        len: usize,
-        access_flags: ffi::ibv_access_flags,
-    ) -> io::Result<MemoryRegion<()>> {
-        let mr = unsafe {
-            ffi::ibv_reg_dmabuf_mr(self.inner.pd, 0, len, iova, fd, access_flags.0 as i32)
-        };
-
-        if mr.is_null() {
-            Err(io::Error::last_os_error())
-        } else {
-            // TODO: Add MemoryRegionUnownedOpaque class for return value which doesn't need to store the `data` ptr.
-            Ok(MemoryRegion {
-                _pd: self.inner.clone(),
-                mr,
-                data: (),
+                data: unsafe { Box::from_raw(addr as *mut T) },
             })
         }
     }

@@ -4,9 +4,9 @@ use crate::transfer::{Client, Protocol, RECORDS};
 use futures::{StreamExt, stream};
 use tokio::net::TcpStream;
 use tokio::{io, task, time};
-use tracing::{Instrument, debug, debug_span, info};
+use tracing::{Instrument, debug, debug_span};
 
-const REQUESTS: usize = 1000;
+const REQUESTS: usize = 200;
 const CONCURRENT_REQUESTS: usize = 5;
 
 pub async fn run<P: Protocol>(dev: ibverbs::Device<'_>, mut stream: TcpStream) -> io::Result<()>

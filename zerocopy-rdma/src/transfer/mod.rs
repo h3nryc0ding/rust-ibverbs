@@ -1,12 +1,11 @@
-mod read_write;
 mod send_recv;
+mod write;
 
-use crate::memory::BufferGuard;
-use crate::record::MockRecord;
+use crate::memory::Handle;
+use crate::protocol::{QueryRequest, QueryResponse};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{io, net};
 use tracing::instrument;
-use crate::protocol::QueryRequest;
 
 pub const RECORDS: usize = 512 * 1024; // 0.5M records ~ 0.5GB
 
@@ -20,7 +19,7 @@ pub trait Client: Clone {
     fn request(
         &mut self,
         r: QueryRequest,
-    ) -> impl Future<Output = io::Result<BufferGuard<MockRecord>>>;
+    ) -> impl Future<Output = io::Result<Handle<QueryResponse>>>;
 }
 
 pub trait Server: Send + Sync {
@@ -38,7 +37,7 @@ pub trait Protocol {
     type Server: Server;
 }
 pub struct SendRecvProtocol;
-pub struct ReadWriteProtocol;
+pub struct WriteProtocol;
 
 #[instrument(skip_all, fields(peer = %stream.peer_addr().unwrap()))]
 async fn synchronize(stream: &mut net::TcpStream) -> io::Result<()> {
