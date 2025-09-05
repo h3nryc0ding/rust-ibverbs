@@ -2,6 +2,7 @@ pub mod jit;
 pub mod pool;
 
 use ibverbs::{LocalMemorySlice, MemoryRegion};
+use std::fmt::{Debug, Formatter};
 use std::io;
 use std::ops::{Deref, DerefMut};
 use tracing::instrument;
@@ -22,6 +23,14 @@ impl<D> Handle<D> {
     pub fn slice(&self) -> LocalMemorySlice {
         self.mr().slice(0..size_of::<D>())
     }
+
+    fn mr(&self) -> &MemoryRegion<D> {
+        self.mr.as_ref().unwrap()
+    }
+
+    fn mr_mut(&mut self) -> &mut MemoryRegion<D> {
+        self.mr.as_mut().unwrap()
+    }
 }
 
 impl<D> Drop for Handle<D> {
@@ -30,16 +39,6 @@ impl<D> Drop for Handle<D> {
         if let Some(mr) = self.mr.take() {
             self.release.release(mr);
         }
-    }
-}
-
-impl<D> Handle<D> {
-    pub fn mr(&self) -> &MemoryRegion<D> {
-        self.mr.as_ref().unwrap()
-    }
-
-    pub fn mr_mut(&mut self) -> &mut MemoryRegion<D> {
-        self.mr.as_mut().unwrap()
     }
 }
 
@@ -54,6 +53,12 @@ impl<D> Deref for Handle<D> {
 impl<D> DerefMut for Handle<D> {
     fn deref_mut(&mut self) -> &mut Self::Target {
         self.mr_mut()
+    }
+}
+
+impl<D: Debug> Debug for Handle<D> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Handle").field("data", &**self).finish()
     }
 }
 

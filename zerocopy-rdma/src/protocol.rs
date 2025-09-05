@@ -1,5 +1,5 @@
 use crate::record::MockRecord;
-use std::ops::RangeBounds;
+use std::ops::{Deref, RangeBounds};
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -17,15 +17,30 @@ impl Default for QueryRequest {
     }
 }
 
-pub type QueryResponse = &'static [MockRecord];
-
 impl QueryRequest {
     pub fn slice(offset: usize, count: usize) -> impl RangeBounds<usize> {
         offset * size_of::<Self>()..(offset + count) * size_of::<Self>()
     }
 }
 
-fn test() {
-    let t = QueryResponse::default();
-    println!("{:?}", t);
+#[repr(C)]
+#[derive(Debug)]
+pub struct QueryResponse<const N: usize>([MockRecord; N]);
+
+impl<const N: usize> Default for QueryResponse<N> {
+    fn default() -> Self {
+        let mut data: [MockRecord; N] = [MockRecord::default(); N];
+        for i in 0..N {
+            data[i] = MockRecord::new(i)
+        }
+        Self(data)
+    }
+}
+
+impl<const N: usize> Deref for QueryResponse<N> {
+    type Target = [MockRecord; N];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
 }

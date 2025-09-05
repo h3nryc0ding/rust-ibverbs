@@ -7,7 +7,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{io, net};
 use tracing::instrument;
 
-pub const RECORDS: usize = 512 * 1024; // 0.5M records ~ 0.5GB
+pub const SERVER_RECORDS: usize = 100;
+pub const CLIENT_RECORDS: usize = 5;
 
 pub trait Client: Clone {
     fn new(
@@ -19,7 +20,7 @@ pub trait Client: Clone {
     fn request(
         &mut self,
         r: QueryRequest,
-    ) -> impl Future<Output = io::Result<Handle<QueryResponse>>>;
+    ) -> impl Future<Output = io::Result<Handle<QueryResponse<CLIENT_RECORDS>>>>;
 }
 
 pub trait Server: Send + Sync {

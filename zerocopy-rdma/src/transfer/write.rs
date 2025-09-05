@@ -1,6 +1,6 @@
 use crate::memory::Handle;
 use crate::protocol::{QueryRequest, QueryResponse};
-use crate::transfer::{Client, Protocol, Server, WriteProtocol};
+use crate::transfer::{CLIENT_RECORDS, Client, Protocol, Server, WriteProtocol};
 use ibverbs::Context;
 use tokio::io;
 use tokio::net::TcpStream;
@@ -13,7 +13,10 @@ impl Client for WriteClient {
         todo!()
     }
 
-    async fn request(&mut self, _r: QueryRequest) -> io::Result<Handle<QueryResponse>> {
+    async fn request(
+        &mut self,
+        _r: QueryRequest,
+    ) -> io::Result<Handle<QueryResponse<CLIENT_RECORDS>>> {
         todo!()
     }
 }

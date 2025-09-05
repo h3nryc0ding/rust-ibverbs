@@ -1,7 +1,9 @@
+use std::cmp::min;
+use std::fmt::{Debug, Formatter};
 use std::usize;
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Copy, Clone)]
 pub struct MockRecord<const N: usize = 1024> {
     pub id: usize,
     pub checksum: u32,
@@ -37,5 +39,15 @@ impl<const N: usize> Default for MockRecord<N> {
             checksum,
             payload,
         }
+    }
+}
+
+impl<const N: usize> Debug for MockRecord<N> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MockRecord")
+            .field("id", &self.id)
+            .field("checksum", &self.checksum)
+            .field("payload", &&self.payload[..min(8, N)])
+            .finish()
     }
 }
