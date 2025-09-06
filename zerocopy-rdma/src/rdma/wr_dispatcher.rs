@@ -48,9 +48,10 @@ impl WRDispatcher {
     pub async fn post_send(
         &mut self,
         local: &[LocalMemorySlice],
+        imm_data: Option<u32>,
     ) -> io::Result<oneshot::Receiver<ibv_wc>> {
         self.post(local, |qp, local, id| unsafe {
-            qp.post_send(local, id, None)
+            qp.post_send(local, id, imm_data)
         })
         .await
     }

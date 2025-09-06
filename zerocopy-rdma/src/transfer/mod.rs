@@ -1,5 +1,4 @@
 mod send_recv;
-mod write;
 
 use crate::memory::Handle;
 use crate::protocol::{QueryRequest, QueryResponse};
@@ -20,7 +19,7 @@ pub trait Client: Clone {
     fn request(
         &mut self,
         r: QueryRequest,
-    ) -> impl Future<Output = io::Result<Handle<QueryResponse<CLIENT_RECORDS>>>>;
+    ) -> impl Future<Output = io::Result<QueryResponse<CLIENT_RECORDS>>>;
 }
 
 pub trait Server: Send + Sync {

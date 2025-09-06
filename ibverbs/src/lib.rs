@@ -1747,7 +1747,12 @@ impl QueuePair {
     ///
     /// [1]: http://www.rdmamojo.com/2013/01/26/ibv_post_send/
     #[inline]
-    pub unsafe fn post_send(&mut self, local: &[LocalMemorySlice], wr_id: u64, imm_data: Option<u32>) -> io::Result<()> {
+    pub unsafe fn post_send(
+        &mut self,
+        local: &[LocalMemorySlice],
+        wr_id: u64,
+        imm_data: Option<u32>,
+    ) -> io::Result<()> {
         let mut wr = ffi::ibv_send_wr {
             wr_id,
             next: ptr::null::<ffi::ibv_send_wr>() as *mut _,
@@ -1762,6 +1767,7 @@ impl QueuePair {
         };
         if let Some(imm) = imm_data {
             wr.__bindgen_anon_1.imm_data = imm;
+            wr.opcode = ffi::ibv_wr_opcode::IBV_WR_SEND_WITH_IMM;
         }
         let mut bad_wr: *mut ffi::ibv_send_wr = ptr::null::<ffi::ibv_send_wr>() as *mut _;
 

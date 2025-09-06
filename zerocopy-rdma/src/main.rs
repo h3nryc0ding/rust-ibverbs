@@ -43,7 +43,7 @@ async fn main() -> io::Result<()> {
 
     match args.protocol {
         Protocol::SendRecv => run::<SendRecvProtocol>(args).await,
-        Protocol::Write => run::<WriteProtocol>(args).await,
+        _ => panic!()
     }
 }
 

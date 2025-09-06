@@ -1,16 +1,19 @@
 use crate::memory::jit::JustInTimeProvider;
 use crate::memory::pool::PoolProvider;
 use crate::memory::{Handle, Provider};
-use crate::protocol::{QueryRequest, QueryResponse};
+use crate::protocol::{QueryMeta, QueryRequest, QueryResponse, QueryResponseBuffer};
 use crate::rdma::wr_dispatcher::WRDispatcher;
 use crate::record::MockRecord;
-use crate::transfer::{CLIENT_RECORDS, SERVER_RECORDS , Client, Protocol, SendRecvProtocol, Server, synchronize};
+use crate::transfer::{
+    CLIENT_RECORDS, Client, Protocol, SERVER_RECORDS, SendRecvProtocol, Server, synchronize,
+};
 use ibverbs::ibv_qp_type::IBV_QPT_RC;
 use ibverbs::{CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair};
+use std::cmp::min;
 use std::sync::Arc;
-use tokio::{io, task};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::{io, task};
 use tracing::{debug, instrument};
 
 const CONCURRENCY: usize = 2;
@@ -20,7 +23,7 @@ pub struct SendRecvClient {
     dispatcher: WRDispatcher,
 
     send: JustInTimeProvider<QueryRequest>,
-    recv: PoolProvider<QueryResponse<CLIENT_RECORDS>>,
+    recv: PoolProvider<QueryResponseBuffer<CLIENT_RECORDS>>,
 }
 
 impl Client for SendRecvClient {
@@ -40,26 +43,28 @@ impl Client for SendRecvClient {
     }
 
     #[instrument(skip_all, name = "Client::request")]
-    async fn request(&mut self, req: QueryRequest) -> io::Result<Handle<QueryResponse<CLIENT_RECORDS>>> {
+    async fn request(&mut self, req: QueryRequest) -> io::Result<QueryResponse<CLIENT_RECORDS>> {
         let mut send = self.send.acquire_mr().await?;
         let recv = self.recv.acquire_mr().await?;
 
         let res = {
             *send = req;
             let recv = self.dispatcher.post_receive(&[recv.slice()]).await?;
-            self.dispatcher.post_send(&[send.slice()]).await?;
+            self.dispatcher.post_send(&[send.slice()], None).await?;
             recv
         };
-        res.await
+        let wc = res
+            .await
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
-        Ok(recv)
+        let meta = QueryMeta::from(wc.imm_data);
+        Ok(QueryResponse::new(recv, meta))
     }
 }
 
 pub struct SendRecvServer {
     dispatcher: WRDispatcher,
 
-    send: Arc<MemoryRegion<QueryResponse<SERVER_RECORDS>>>,
+    send: Arc<MemoryRegion<QueryResponseBuffer<SERVER_RECORDS>>>,
     recv: PoolProvider<QueryRequest>,
 }
 
@@ -94,11 +99,19 @@ impl Server for SendRecvServer {
                 let req = recv;
                 debug!(req = ?*req, "received request");
 
+                let start = req.offset;
+                let end = min(SERVER_RECORDS, start + req.count);
                 let s = size_of::<MockRecord>();
-                let slice = send.slice(req.offset * s..(req.offset + req.count) * s);
+                let slice = send.slice(start * s..end * s);
                 debug!(resp = ?slice, "prepared response");
+                let meta = QueryMeta::new(0, (end - start) as u16);
 
-                dispatcher.post_send(&[slice]).await.unwrap().await.unwrap();
+                dispatcher
+                    .post_send(&[slice], Some(u32::from(meta)))
+                    .await
+                    .unwrap()
+                    .await
+                    .unwrap();
             });
         }
     }

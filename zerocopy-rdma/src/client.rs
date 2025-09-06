@@ -38,8 +38,8 @@ where
         .for_each_concurrent(None, |(id, offset, count, res)| async move {
             match res {
                 Ok(records) => task::spawn_blocking(move || {
-                    debug_span!("verify", request_id = id).in_scope(|| {
-                        debug!("offset: {}", records[0].id == offset);
+                    debug_span!("verify", request_id = id, res = ?records).in_scope(|| {
+                        debug!("offset: {}", records.len() > 0 && records[0].id == offset);
                         debug!("count: {}", records.len() == count);
                         debug!("checksum: {}", records.iter().all(MockRecord::validate));
                     });
