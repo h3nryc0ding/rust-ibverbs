@@ -1,13 +1,12 @@
 mod send_recv;
 
-use crate::memory::Handle;
 use crate::protocol::{QueryRequest, QueryResponse};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{io, net};
 use tracing::instrument;
 
-pub const SERVER_RECORDS: usize = 100;
-pub const CLIENT_RECORDS: usize = 5;
+pub const SERVER_RECORDS: usize = 100_000;
+pub const CLIENT_RECORDS: usize = 10_000;
 
 pub trait Client: Clone {
     fn new(
@@ -16,10 +15,7 @@ pub trait Client: Clone {
     ) -> impl Future<Output = io::Result<Self>>
     where
         Self: Sized;
-    fn request(
-        &mut self,
-        r: QueryRequest,
-    ) -> impl Future<Output = io::Result<QueryResponse<CLIENT_RECORDS>>>;
+    fn request(&mut self, r: QueryRequest) -> impl Future<Output = io::Result<QueryResponse>>;
 }
 
 pub trait Server: Send + Sync {

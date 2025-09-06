@@ -3,8 +3,7 @@
 pub mod client;
 mod memory;
 mod protocol;
-mod record;
+mod rdma;
 pub mod server;
 pub mod transfer;
 mod utils;
-mod rdma;

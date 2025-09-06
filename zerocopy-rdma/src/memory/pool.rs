@@ -1,60 +1,40 @@
-use crate::memory::{Handle, Provider, Releaser};
-use ibverbs::{MemoryRegion, ProtectionDomain};
+use crate::memory::{ManagedMemoryRegion, MemoryProvider};
+use ibverbs::MemoryRegion;
 use std::io;
-use std::sync::Arc;
-use tokio::sync::{Mutex, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 
-struct PoolReleaser<D> {
-    tx: mpsc::Sender<MemoryRegion<D>>,
+pub struct PoolProvider {
+    tx: mpsc::Sender<MemoryRegion>,
+    rx: Arc<Mutex<mpsc::Receiver<MemoryRegion>>>,
 }
 
-impl<D> Releaser<D> for PoolReleaser<D> {
-    fn release(&self, mr: MemoryRegion<D>) {
-        let _ = self.tx.try_send(mr).unwrap();
-    }
-}
-
-pub struct PoolProvider<D> {
-    tx: mpsc::Sender<MemoryRegion<D>>,
-    rx: Arc<Mutex<mpsc::Receiver<MemoryRegion<D>>>>,
-}
-
-impl<D: Default> PoolProvider<D> {
-    pub fn new(pd: &ProtectionDomain, size: usize) -> io::Result<Self> {
-        let (tx, rx) = mpsc::channel(size);
-        for _ in 0..size {
-            let mr = pd.allocate()?;
-            let _ = tx.try_send(mr).unwrap();
+impl PoolProvider {
+    pub fn new(pool: Vec<MemoryRegion>) -> Self {
+        let (tx, rx) = mpsc::channel();
+        for mr in pool {
+            tx.send(mr).unwrap();
         }
-        Ok(Self {
+        PoolProvider {
             tx,
             rx: Arc::new(Mutex::new(rx)),
-        })
-    }
-}
-
-impl<D> Clone for PoolProvider<D> {
-    fn clone(&self) -> Self {
-        PoolProvider {
-            tx: self.tx.clone(),
-            rx: self.rx.clone(),
         }
     }
 }
 
-impl<D: 'static> Provider<D> for PoolProvider<D> {
-    async fn acquire_mr(&mut self) -> io::Result<Handle<D>> {
-        match self.rx.lock().await.recv().await {
-            Some(mr) => Ok(Handle {
+impl MemoryProvider for PoolProvider {
+    fn allocate(&self, _size: usize) -> io::Result<ManagedMemoryRegion> {
+        match self.rx.lock().unwrap().recv() {
+            Ok(mr) => Ok(ManagedMemoryRegion {
                 mr: Some(mr),
-                release: Box::new(PoolReleaser {
-                    tx: self.tx.clone(),
-                }),
+                provider: self,
             }),
-            None => Err(io::Error::new(
-                io::ErrorKind::BrokenPipe,
-                "Memory region pool channel closed",
-            )),
+            Err(e) => Err(io::Error::new(io::ErrorKind::Other, e)),
         }
+    }
+
+    fn deallocate(&self, mr: MemoryRegion) -> io::Result<()> {
+        self.tx
+            .send(mr)
+            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))
     }
 }

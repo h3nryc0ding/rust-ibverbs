@@ -2,7 +2,7 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use tokio::net::TcpStream;
 use tokio::{io, net};
 use tracing::Level;
-use zerocopy::transfer::{SendRecvProtocol, WriteProtocol};
+use zerocopy::transfer::SendRecvProtocol;
 use zerocopy::{client, server, transfer};
 
 #[derive(clap::Parser, Debug)]
@@ -43,7 +43,7 @@ async fn main() -> io::Result<()> {
 
     match args.protocol {
         Protocol::SendRecv => run::<SendRecvProtocol>(args).await,
-        _ => panic!()
+        _ => panic!(),
     }
 }
 

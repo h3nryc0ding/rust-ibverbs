@@ -1485,24 +1485,27 @@ impl PreparedQueuePair {
 }
 
 /// A memory region that has been registered for use with RDMA.
-pub struct MemoryRegion<T> {
+pub struct MemoryRegion {
     _pd: Arc<ProtectionDomainInner>,
     mr: *mut ffi::ibv_mr,
-    data: Box<T>,
+    data: Box<[u8]>,
+    capacity: usize,
 }
 
-unsafe impl<T> Send for MemoryRegion<T> {}
-unsafe impl<T> Sync for MemoryRegion<T> {}
+unsafe impl Send for MemoryRegion {}
+unsafe impl Sync for MemoryRegion {}
 
-impl<T> MemoryRegion<T> {
-    /// Get the remote authentication key used to allow direct remote access to this memory region.
+impl MemoryRegion {
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
     pub fn rkey(&self) -> RemoteKey {
         RemoteKey {
             key: unsafe { &*self.mr }.rkey,
         }
     }
 
-    /// Remote region.
     pub fn remote(&self) -> RemoteMemoryRegion {
         RemoteMemoryRegion {
             addr: unsafe { *self.mr }.addr as u64,
@@ -1511,31 +1514,40 @@ impl<T> MemoryRegion<T> {
         }
     }
 
-    /// Make a subslice of this memory region.
-    pub fn slice(&self, bounds: impl RangeBounds<usize>) -> LocalMemorySlice {
-        let (addr, length) = calc_addr_len(
-            &bounds,
-            unsafe { *self.mr }.addr as u64,
-            unsafe { *self.mr }.length,
-        );
+    pub fn slice(&self, start: usize, len: usize) -> io::Result<LocalMemorySlice> {
+        if start + len > self.capacity {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "slice out of bounds",
+            ));
+        }
+        let addr = (unsafe { (*self.mr).addr } as u64) + start as u64;
         let sge = ffi::ibv_sge {
             addr,
-            length,
-            lkey: unsafe { *self.mr }.lkey,
+            length: len as u32,
+            lkey: unsafe { (*self.mr).lkey },
         };
-        LocalMemorySlice { _sge: sge }
+        Ok(LocalMemorySlice { _sge: sge })
+    }
+
+    pub unsafe fn as_slice(&self, start: usize, len: usize) -> &[u8] {
+        std::slice::from_raw_parts(self.data.as_ptr().add(start), len)
+    }
+
+    pub unsafe fn as_slice_mut(&mut self, start: usize, len: usize) -> &mut [u8] {
+        std::slice::from_raw_parts_mut(self.data.as_mut_ptr().add(start), len)
     }
 }
 
-impl<T> Deref for MemoryRegion<T> {
-    type Target = T;
+impl Deref for MemoryRegion {
+    type Target = [u8];
 
     fn deref(&self) -> &Self::Target {
         &self.data
     }
 }
 
-impl<T> DerefMut for MemoryRegion<T> {
+impl DerefMut for MemoryRegion {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.data
     }
@@ -1611,7 +1623,7 @@ pub struct RemoteKey {
     pub key: u32,
 }
 
-impl<T> Drop for MemoryRegion<T> {
+impl Drop for MemoryRegion {
     fn drop(&mut self) {
         let errno = unsafe { ffi::ibv_dereg_mr(self.mr) };
         if errno != 0 {
@@ -1677,24 +1689,30 @@ impl ProtectionDomain {
             1,
         ))
     }
-    pub fn allocate<T: Default>(&self) -> io::Result<MemoryRegion<T>> {
-        let data = Box::new(T::default());
+    pub fn allocate(&self, size: usize) -> io::Result<MemoryRegion> {
+        let data = vec![0u8; size].into_boxed_slice();
         self.register(data)
     }
 
-    pub fn register<T>(&self, data: Box<T>) -> io::Result<MemoryRegion<T>> {
-        let len = size_of::<T>();
-        assert!(len > 0);
-        let addr = Box::into_raw(data) as *mut c_void;
-        let mr =
-            unsafe { ffi::ibv_reg_mr(self.inner.pd, addr, len, DEFAULT_ACCESS_FLAGS.0 as i32) };
+    pub fn register(&self, data: Box<[u8]>) -> io::Result<MemoryRegion> {
+        let size = data.len();
+        assert!(size > 0);
+        let mr = unsafe {
+            ffi::ibv_reg_mr(
+                self.inner.pd,
+                data.as_ptr() as *mut _,
+                size,
+                DEFAULT_ACCESS_FLAGS.0 as _,
+            )
+        };
         if mr.is_null() {
             Err(io::Error::last_os_error())
         } else {
             Ok(MemoryRegion {
                 _pd: self.inner.clone(),
                 mr,
-                data: unsafe { Box::from_raw(addr as *mut T) },
+                data,
+                capacity: size,
             })
         }
     }
