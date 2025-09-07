@@ -1,7 +1,8 @@
 use crate::memory::jit::JitProvider;
 use crate::memory::pooled::PooledProvider;
 use crate::memory::{MemoryHandle, MemoryProvider};
-use crate::{ClientMeta, ServerMeta, await_completions};
+use crate::transfer::send_recv::{ClientMeta, ServerMeta};
+use crate::transfer::{SERVER_SIZE, Server, await_completions};
 use ibverbs::{CompletionQueue, Context, ProtectionDomain, QueuePair, ibv_qp_type};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
@@ -11,9 +12,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, ToSocketAddrs};
 use std::sync::Arc;
 
-const RECORDS: usize = 1 * 2usize.pow(30); // 1 GiB
-
-pub struct Server {
+pub struct SendRecvServer {
     ctx: Context,
     pd: Arc<ProtectionDomain>,
     cq: CompletionQueue,
@@ -21,16 +20,23 @@ pub struct Server {
 
     jit_provider: JitProvider,
     pooled_provider: PooledProvider,
+
+    s_res: MemoryHandle<u8>,
 }
 
-impl Server {
-    pub fn new<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
+impl Server for SendRecvServer {
+    fn new<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
         let ctx = ibverbs::devices()?
             .get(0)
             .expect("No IB devices found")
             .open()?;
         let pd = Arc::new(ctx.alloc_pd()?);
         let cq = ctx.create_cq(4096, 0)?;
+
+        let jit_provider = JitProvider::new(pd.clone());
+        let pooled_provider = PooledProvider::new(pd.clone());
+        let s_res: MemoryHandle<u8> = pooled_provider.allocate(SERVER_SIZE)?;
+
         let qp = {
             let qpb = pd
                 .create_qp(&cq, &cq, ibv_qp_type::IBV_QPT_RC)?
@@ -49,9 +55,6 @@ impl Server {
             qpb.handshake(remote)?
         };
 
-        let jit_provider = JitProvider::new(pd.clone());
-        let pooled_provider = PooledProvider::new(pd.clone());
-
         Ok(Self {
             ctx,
             pd,
@@ -59,14 +62,15 @@ impl Server {
             qp,
             jit_provider,
             pooled_provider,
+            s_res,
         })
     }
 
-    pub fn serve(&mut self) -> io::Result<()> {
+    fn serve(&mut self) -> io::Result<()> {
         let mut id = 0;
         let mut rng = ChaCha8Rng::seed_from_u64(1337);
         loop {
-            let size = rng.random_range(0..RECORDS);
+            let size = rng.random_range(0..SERVER_SIZE);
 
             let c_req: MemoryHandle<u8> = self.pooled_provider.allocate(1)?;
             let local = c_req.slice(..);
@@ -83,8 +87,7 @@ impl Server {
             unsafe { self.qp.post_send(&[local], id, None)? }
             await_completions::<2>(&mut self.cq)?;
 
-            let s_res: MemoryHandle<u8> = self.jit_provider.allocate(size)?;
-            let local = s_res.slice(..size);
+            let local = self.s_res.slice(..size);
             unsafe { self.qp.post_send(&[local], id, None)? }
             await_completions::<1>(&mut self.cq)?;
 

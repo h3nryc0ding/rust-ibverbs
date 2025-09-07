@@ -3,7 +3,7 @@ use ibverbs::{MemoryRegion, ProtectionDomain};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::{Arc, Mutex};
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 #[derive(Clone)]
 pub struct PooledProvider {
@@ -48,6 +48,7 @@ impl MemoryProvider for PooledProvider {
 
         let pools = Arc::clone(&self.pools);
         let cleanup = move |mr: MemoryRegion<T>| {
+            debug!("Returning memory region to pool");
             let mr = mr.cast::<u8>();
             let mut pools = pools.lock().unwrap();
             let pool = pools.entry(size).or_insert_with(VecDeque::new);

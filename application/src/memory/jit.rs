@@ -2,7 +2,7 @@ use crate::memory::{MemoryHandle, MemoryProvider};
 use ibverbs::ProtectionDomain;
 use std::io;
 use std::sync::Arc;
-use tracing::instrument;
+use tracing::{debug, instrument};
 
 #[derive(Clone)]
 pub struct JitProvider {
@@ -21,6 +21,7 @@ impl MemoryProvider for JitProvider {
         let mr = self.pd.allocate(count)?;
 
         let cleanup = |mr| {
+            debug!("Deregistering memory region");
             drop(mr);
         };
 

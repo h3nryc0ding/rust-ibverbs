@@ -1,7 +1,8 @@
 use crate::memory::jit::JitProvider;
 use crate::memory::pooled::PooledProvider;
 use crate::memory::{MemoryHandle, MemoryProvider};
-use crate::{ClientMeta, ServerMeta, await_completions};
+use crate::transfer::send_recv::{ClientMeta, ServerMeta};
+use crate::transfer::{Client, await_completions};
 use ibverbs::{CompletionQueue, Context, ProtectionDomain, QueuePair, ibv_qp_type};
 use std::io;
 use std::io::{Read, Write};
@@ -9,7 +10,7 @@ use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
 use tracing::instrument;
 
-pub struct Client {
+pub struct SendRecvClient {
     ctx: Context,
     pd: Arc<ProtectionDomain>,
     cq: CompletionQueue,
@@ -20,8 +21,8 @@ pub struct Client {
     pooled_provider: PooledProvider,
 }
 
-impl Client {
-    pub fn new<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
+impl Client for SendRecvClient {
+    fn new<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
         let ctx = ibverbs::devices()?
             .get(0)
             .expect("No IB devices found")
@@ -60,7 +61,7 @@ impl Client {
     }
 
     #[instrument(skip(self), ret, err)]
-    pub fn request(&mut self, req: u8) -> io::Result<MemoryHandle> {
+    fn request(&mut self, req: u8) -> io::Result<MemoryHandle> {
         let id = self.id;
 
         let s_met: MemoryHandle<ServerMeta> = self.pooled_provider.allocate(1)?;
