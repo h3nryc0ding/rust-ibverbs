@@ -1,0 +1,27 @@
+use crate::memory::{MemoryHandle, MemoryProvider};
+use ibverbs::ProtectionDomain;
+use std::io;
+use std::sync::Arc;
+
+#[derive(Clone)]
+pub struct JitProvider {
+    pd: Arc<ProtectionDomain>,
+}
+
+impl JitProvider {
+    pub fn new(pd: Arc<ProtectionDomain>) -> Self {
+        JitProvider { pd }
+    }
+}
+
+impl MemoryProvider for JitProvider {
+    fn allocate<T: 'static>(&self, count: usize) -> io::Result<MemoryHandle<T>> {
+        let mr = self.pd.allocate(count)?;
+
+        let cleanup = |mr| {
+            drop(mr);
+        };
+
+        Ok(MemoryHandle::new(mr, cleanup))
+    }
+}

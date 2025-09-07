@@ -1,0 +1,75 @@
+pub mod jit;
+pub mod pooled;
+
+use ibverbs::MemoryRegion;
+use std::fmt::{Debug, Formatter};
+use std::mem::ManuallyDrop;
+use std::ops::{Deref, DerefMut};
+use std::{io, mem};
+
+pub trait MemoryProvider {
+    fn allocate<T: 'static>(&self, count: usize) -> io::Result<MemoryHandle<T>>;
+}
+
+pub struct MemoryHandle<T = u8> {
+    mr: ManuallyDrop<MemoryRegion<T>>,
+    cleanup: Box<dyn FnOnce(MemoryRegion<T>) + Send + 'static>,
+}
+
+impl<T: 'static> MemoryHandle<T> {
+    pub fn new(
+        mr: MemoryRegion<T>,
+        cleanup: impl FnOnce(MemoryRegion<T>) + Send + 'static,
+    ) -> Self {
+        Self {
+            mr: ManuallyDrop::new(mr),
+            cleanup: Box::new(cleanup),
+        }
+    }
+
+    pub fn cast<U>(mut self) -> MemoryHandle<U> {
+        let mr = unsafe { ManuallyDrop::take(&mut self.mr).cast::<U>() };
+        let cleanup = mem::replace(&mut self.cleanup, Box::new(|_| ()));
+
+        mem::forget(self);
+
+        MemoryHandle {
+            mr: ManuallyDrop::new(mr),
+            cleanup: Box::new(|mr| {
+                let mr = mr.cast::<T>();
+                cleanup(mr);
+            }),
+        }
+    }
+}
+
+impl<T> Deref for MemoryHandle<T> {
+    type Target = MemoryRegion<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.mr
+    }
+}
+
+impl<T> DerefMut for MemoryHandle<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.mr
+    }
+}
+
+impl<T> Drop for MemoryHandle<T> {
+    fn drop(&mut self) {
+        let mr = unsafe { ManuallyDrop::take(&mut self.mr) };
+        let cleanup = mem::replace(&mut self.cleanup, Box::new(|_| ()));
+        cleanup(mr);
+    }
+}
+
+impl<T> Debug for MemoryHandle<T> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MemoryHandle")
+            .field("ptr", &self.mr.ptr())
+            .field("length", &self.mr.length())
+            .finish()
+    }
+}

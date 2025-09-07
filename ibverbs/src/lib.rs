@@ -64,15 +64,18 @@
 // avoid warnings about RDMAmojo, iWARP, InfiniBand, etc. not being in backticks
 #![allow(clippy::doc_markdown)]
 
+use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::convert::TryInto;
 use std::ffi::CStr;
-use std::io;
-use std::ops::{Deref, DerefMut, RangeBounds};
+use std::fmt::Debug;
+use std::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
 use std::os::fd::BorrowedFd;
 use std::os::raw::c_void;
 use std::ptr;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::time::Duration;
+use std::{io, mem};
 
 const PORT_NUM: u8 = 1;
 
@@ -1317,6 +1320,7 @@ impl From<ffi::ibv_gid_entry> for GidEntry {
 /// Internally, this contains the `QueuePair`'s `qp_num`, as well as the context's `lid` and `gid`.
 #[derive(Copy, Clone, PartialEq, Eq, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[repr(C)]
 pub struct QueuePairEndpoint {
     /// the `QueuePair`'s `qp_num`
     pub num: u32,
@@ -1485,10 +1489,11 @@ impl PreparedQueuePair {
 }
 
 /// A memory region that has been registered for use with RDMA.
-pub struct MemoryRegion<T> {
-    _pd: Arc<ProtectionDomainInner>,
+pub struct MemoryRegion<T = u8> {
+    ptr: NonNull<T>,
+    length: usize,
     mr: *mut ffi::ibv_mr,
-    data: Box<T>,
+    _pd: Arc<ProtectionDomainInner>,
 }
 
 unsafe impl<T> Send for MemoryRegion<T> {}
@@ -1525,19 +1530,101 @@ impl<T> MemoryRegion<T> {
         };
         LocalMemorySlice { _sge: sge }
     }
-}
 
-impl<T> Deref for MemoryRegion<T> {
-    type Target = T;
+    pub fn ptr(&self) -> NonNull<T> {
+        self.ptr
+    }
 
-    fn deref(&self) -> &Self::Target {
-        &self.data
+    pub fn as_ptr(&self) -> *mut T {
+        self.ptr.as_ptr()
+    }
+
+    pub fn length(&self) -> usize {
+        self.length
+    }
+
+    pub fn as_slice(&self) -> &[T] {
+        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.length) }
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [T] {
+        unsafe { std::slice::from_raw_parts_mut(self.as_ptr(), self.length) }
+    }
+
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index < self.length {
+            unsafe { Some(&*self.as_ptr().add(index)) }
+        } else {
+            None
+        }
+    }
+
+    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
+        if index < self.length {
+            unsafe { Some(&mut *self.as_ptr().add(index)) }
+        } else {
+            None
+        }
+    }
+
+    pub fn cast<U>(self) -> MemoryRegion<U> {
+        assert_eq!(self.length * size_of::<T>() % size_of::<U>(), 0);
+        let length = self.length * size_of::<T>() / size_of::<U>();
+        let ptr = self.ptr.cast::<U>();
+        let mr = self.mr;
+        let pd = self._pd.clone();
+
+        mem::forget(self);
+
+        MemoryRegion {
+            ptr,
+            length,
+            mr,
+            _pd: pd,
+        }
     }
 }
 
-impl<T> DerefMut for MemoryRegion<T> {
+impl<T> Index<usize> for MemoryRegion<T> {
+    type Output = T;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        self.get(index).expect("index out of bounds")
+    }
+}
+
+impl<T> IndexMut<usize> for MemoryRegion<T> {
+    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
+        self.get_mut(index).expect("index out of bounds")
+    }
+}
+
+impl<T> Deref for MemoryRegion<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
+}
+
+impl DerefMut for MemoryRegion {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.data
+        self.as_mut_slice()
+    }
+}
+
+impl<T> Drop for MemoryRegion<T> {
+    fn drop(&mut self) {
+        unsafe {
+            let errno = ffi::ibv_dereg_mr(self.mr);
+            let size = self.length * size_of::<T>();
+            let layout = Layout::from_size_align_unchecked(size, align_of::<T>());
+            dealloc(self.ptr.as_ptr() as *mut u8, layout);
+            if errno != 0 {
+                let e = io::Error::from_raw_os_error(errno);
+                panic!("{e}");
+            }
+        }
     }
 }
 
@@ -1584,8 +1671,8 @@ pub struct RemoteMemoryRegion {
 #[allow(clippy::len_without_is_empty)]
 impl RemoteMemoryRegion {
     /// Make a subslice of this slice.
-    pub fn slice(&self, bounds: &impl RangeBounds<usize>) -> RemoteMemorySlice {
-        let (addr, len) = calc_addr_len(bounds, self.addr, self.len);
+    pub fn slice(&self, bounds: impl RangeBounds<usize>) -> RemoteMemorySlice {
+        let (addr, len) = calc_addr_len(&bounds, self.addr, self.len);
         RemoteMemorySlice {
             addr,
             length: len,
@@ -1609,16 +1696,6 @@ pub struct RemoteMemorySlice {
 pub struct RemoteKey {
     /// The actual key value.
     pub key: u32,
-}
-
-impl<T> Drop for MemoryRegion<T> {
-    fn drop(&mut self) {
-        let errno = unsafe { ffi::ibv_dereg_mr(self.mr) };
-        if errno != 0 {
-            let e = io::Error::from_raw_os_error(errno);
-            panic!("{e}");
-        }
-    }
 }
 
 struct ProtectionDomainInner {
@@ -1677,26 +1754,42 @@ impl ProtectionDomain {
             1,
         ))
     }
-    pub fn allocate<T: Default>(&self) -> io::Result<MemoryRegion<T>> {
-        let data = Box::new(T::default());
-        self.register(data)
-    }
-
-    pub fn register<T>(&self, data: Box<T>) -> io::Result<MemoryRegion<T>> {
-        let len = size_of::<T>();
-        assert!(len > 0);
-        let addr = Box::into_raw(data) as *mut c_void;
-        let mr =
-            unsafe { ffi::ibv_reg_mr(self.inner.pd, addr, len, DEFAULT_ACCESS_FLAGS.0 as i32) };
-        if mr.is_null() {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(MemoryRegion {
-                _pd: self.inner.clone(),
-                mr,
-                data: unsafe { Box::from_raw(addr as *mut T) },
-            })
+    /// TODO: zero initialized T
+    pub fn allocate<T>(&self, count: usize) -> io::Result<MemoryRegion<T>> {
+        let length = count * size_of::<T>();
+        assert!(length > 0);
+        let layout = Layout::from_size_align(length, align_of::<T>())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "Invalid size/alignment"))?;
+        let ptr = unsafe { alloc_zeroed(layout) } as *mut T;
+        if ptr.is_null() {
+            return Err(io::Error::new(
+                io::ErrorKind::OutOfMemory,
+                "Allocation failed",
+            ));
         }
+
+        let ptr = unsafe { NonNull::new_unchecked(ptr as *mut T) };
+
+        let mr = unsafe {
+            ffi::ibv_reg_mr(
+                self.inner.pd,
+                ptr.as_ptr() as *mut _,
+                length,
+                DEFAULT_ACCESS_FLAGS.0 as _,
+            )
+        };
+
+        if mr.is_null() {
+            unsafe { dealloc(ptr.as_ptr() as *mut u8, layout) };
+            return Err(io::Error::last_os_error());
+        }
+
+        Ok(MemoryRegion {
+            ptr,
+            length,
+            mr,
+            _pd: self.inner.clone(),
+        })
     }
 }
 

@@ -1,6 +1,6 @@
 mod send_recv;
+mod write;
 
-use crate::memory::Handle;
 use crate::protocol::{QueryRequest, QueryResponse};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::{io, net};

@@ -1,6 +1,6 @@
 use crate::memory::jit::JustInTimeProvider;
 use crate::memory::pool::PoolProvider;
-use crate::memory::{Handle, Provider};
+use crate::memory::Provider;
 use crate::protocol::{QueryMeta, QueryRequest, QueryResponse, QueryResponseBuffer};
 use crate::rdma::wr_dispatcher::WRDispatcher;
 use crate::record::MockRecord;
@@ -13,7 +13,7 @@ use std::cmp::min;
 use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::{io, task};
+use tokio::io;
 use tracing::{debug, instrument};
 
 const CONCURRENCY: usize = 2;
