@@ -7,6 +7,7 @@ use std::io;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::sync::Arc;
+use tracing::instrument;
 
 pub struct Client {
     ctx: Context,
@@ -58,43 +59,40 @@ impl Client {
         })
     }
 
+    #[instrument(skip(self), ret, err)]
     pub fn request(&mut self, req: u8) -> io::Result<MemoryHandle> {
         let id = self.id;
 
-        let s_met: MemoryHandle<ServerMeta> = self.jit_provider.allocate(1)?;
-        let local = s_met.slice(0..size_of::<ServerMeta>());
+        let s_met: MemoryHandle<ServerMeta> = self.pooled_provider.allocate(1)?;
+        let local = s_met.slice(..);
         unsafe {
             self.qp.post_receive(&[local], id)?;
         }
-        let mut c_req: MemoryHandle<u8> = self.jit_provider.allocate::<u8>(1)?;
+        let mut c_req: MemoryHandle<u8> = self.pooled_provider.allocate::<u8>(1)?;
         c_req[0] = req;
-        let local = c_req.slice(0..size_of::<u8>());
+        let local = c_req.slice(..);
         unsafe {
             self.qp.post_send(&[local], id, None)?;
         }
         await_completions::<2>(&mut self.cq)?;
-        println!("Sent: {:?}", c_req[0]);
-        println!("Received: {:?}", s_met[0]);
         let size = s_met[0].size;
 
-        let mut c_meta: MemoryHandle<ClientMeta> = self.jit_provider.allocate(1)?;
-        let s_res: MemoryHandle<u8> = self.pooled_provider.allocate(size)?;
+        let mut c_meta: MemoryHandle<ClientMeta> = self.pooled_provider.allocate(1)?;
+        let s_res: MemoryHandle<u8> = self.jit_provider.allocate(size)?;
         {
             c_meta[0].addr = s_res.remote().addr as usize;
             c_meta[0].rkey = s_res.remote().rkey as usize;
         }
-        let local = s_res.slice(0..size);
+        let local = s_res.slice(..size);
         unsafe {
             self.qp.post_receive(&[local], id)?;
         }
-        let local = c_meta.slice(0..size_of::<ClientMeta>());
+        let local = c_meta.slice(..);
         unsafe {
             self.qp.post_send(&[local], id, None)?;
         }
 
         await_completions::<2>(&mut self.cq)?;
-        println!("Sent: {:?}", c_meta[0]);
-        // println!("Received: {:?}", s_res[0..size]);
 
         Ok(s_res)
     }

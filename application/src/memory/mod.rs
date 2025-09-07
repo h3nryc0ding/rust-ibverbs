@@ -5,7 +5,8 @@ use ibverbs::MemoryRegion;
 use std::fmt::{Debug, Formatter};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::{io, mem};
+use std::{any, io, mem};
+use tracing::instrument;
 
 pub trait MemoryProvider {
     fn allocate<T: 'static>(&self, count: usize) -> io::Result<MemoryHandle<T>>;
@@ -17,6 +18,7 @@ pub struct MemoryHandle<T = u8> {
 }
 
 impl<T: 'static> MemoryHandle<T> {
+    #[instrument(skip_all, name = "MemoryHandle::new", ret)]
     pub fn new(
         mr: MemoryRegion<T>,
         cleanup: impl FnOnce(MemoryRegion<T>) + Send + 'static,
@@ -27,6 +29,7 @@ impl<T: 'static> MemoryHandle<T> {
         }
     }
 
+    #[instrument(name = "MemoryHandle::cast", ret)]
     pub fn cast<U>(mut self) -> MemoryHandle<U> {
         let mr = unsafe { ManuallyDrop::take(&mut self.mr).cast::<U>() };
         let cleanup = mem::replace(&mut self.cleanup, Box::new(|_| ()));
@@ -58,6 +61,7 @@ impl<T> DerefMut for MemoryHandle<T> {
 }
 
 impl<T> Drop for MemoryHandle<T> {
+    #[instrument(name = "MemoryHandle::drop")]
     fn drop(&mut self) {
         let mr = unsafe { ManuallyDrop::take(&mut self.mr) };
         let cleanup = mem::replace(&mut self.cleanup, Box::new(|_| ()));
@@ -70,6 +74,7 @@ impl<T> Debug for MemoryHandle<T> {
         f.debug_struct("MemoryHandle")
             .field("ptr", &self.mr.ptr())
             .field("length", &self.mr.length())
+            .field("type", &any::type_name::<T>())
             .finish()
     }
 }

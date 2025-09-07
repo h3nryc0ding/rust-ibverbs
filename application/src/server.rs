@@ -4,12 +4,14 @@ use crate::memory::{MemoryHandle, MemoryProvider};
 use crate::{ClientMeta, ServerMeta, await_completions};
 use ibverbs::{CompletionQueue, Context, ProtectionDomain, QueuePair, ibv_qp_type};
 use rand::Rng;
+use rand_chacha::ChaCha8Rng;
+use rand_chacha::rand_core::SeedableRng;
 use std::io;
 use std::io::{Read, Write};
 use std::net::{TcpListener, ToSocketAddrs};
 use std::sync::Arc;
 
-const RECORDS: usize = 1024 * 1024;
+const RECORDS: usize = 1 * 2usize.pow(30); // 1 GiB
 
 pub struct Server {
     ctx: Context,
@@ -62,33 +64,29 @@ impl Server {
 
     pub fn serve(&mut self) -> io::Result<()> {
         let mut id = 0;
-        let mut rng = rand::rng();
+        let mut rng = ChaCha8Rng::seed_from_u64(1337);
         loop {
             let size = rng.random_range(0..RECORDS);
 
-            let c_req: MemoryHandle<u8> = self.jit_provider.allocate(1)?;
-            let local = c_req.slice(0..size_of::<u8>());
+            let c_req: MemoryHandle<u8> = self.pooled_provider.allocate(1)?;
+            let local = c_req.slice(..);
             unsafe { self.qp.post_receive(&[local], id)? }
             await_completions::<1>(&mut self.cq)?;
-            println!("Received: {:?}", c_req[0]);
 
-            let mut s_met: MemoryHandle<ServerMeta> = self.jit_provider.allocate(1)?;
+            let mut s_met: MemoryHandle<ServerMeta> = self.pooled_provider.allocate(1)?;
             s_met[0].size = size;
 
-            let c_met: MemoryHandle<ClientMeta> = self.jit_provider.allocate(1)?;
-            let local = c_met.slice(0..size_of::<ClientMeta>());
+            let c_met: MemoryHandle<ClientMeta> = self.pooled_provider.allocate(1)?;
+            let local = c_met.slice(..);
             unsafe { self.qp.post_receive(&[local], id)? }
-            let local = s_met.slice(0..size_of::<ServerMeta>());
+            let local = s_met.slice(..);
             unsafe { self.qp.post_send(&[local], id, None)? }
             await_completions::<2>(&mut self.cq)?;
-            println!("Sent: {:?}", s_met[0]);
-            println!("Received: {:?}", c_met[0]);
 
-            let s_res: MemoryHandle<u8> = self.pooled_provider.allocate(size)?;
-            let local = s_res.slice(0..size);
+            let s_res: MemoryHandle<u8> = self.jit_provider.allocate(size)?;
+            let local = s_res.slice(..size);
             unsafe { self.qp.post_send(&[local], id, None)? }
             await_completions::<1>(&mut self.cq)?;
-            // println!("Sent {:?}", s_res[0..size]);
 
             id += 1;
         }

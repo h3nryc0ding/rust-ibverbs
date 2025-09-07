@@ -68,7 +68,7 @@ use std::alloc::{alloc_zeroed, dealloc, Layout};
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::fmt::Debug;
-use std::ops::{Deref, DerefMut, Index, IndexMut, RangeBounds};
+use std::ops::{Bound, Deref, DerefMut, Index, IndexMut, RangeBounds};
 use std::os::fd::BorrowedFd;
 use std::os::raw::c_void;
 use std::ptr;
@@ -517,13 +517,13 @@ impl Drop for CompletionQueueInner {
         let errno = unsafe { ffi::ibv_destroy_cq(self.cq) };
         if errno != 0 {
             let e = io::Error::from_raw_os_error(errno);
-            panic!("{e}");
+            panic!("destroy_cq failed: {e}");
         }
 
         let errno = unsafe { ffi::ibv_destroy_comp_channel(self.cc) };
         if errno != 0 {
             let e = io::Error::from_raw_os_error(errno);
-            panic!("{e}");
+            panic!("destroy_comp_channel failed: {e}");
         }
     }
 }
@@ -1491,7 +1491,7 @@ impl PreparedQueuePair {
 /// A memory region that has been registered for use with RDMA.
 pub struct MemoryRegion<T = u8> {
     ptr: NonNull<T>,
-    length: usize,
+    count: usize,
     mr: *mut ffi::ibv_mr,
     _pd: Arc<ProtectionDomainInner>,
 }
@@ -1518,14 +1518,23 @@ impl<T> MemoryRegion<T> {
 
     /// Make a subslice of this memory region.
     pub fn slice(&self, bounds: impl RangeBounds<usize>) -> LocalMemorySlice {
-        let (addr, length) = calc_addr_len(
-            &bounds,
-            unsafe { *self.mr }.addr as u64,
-            unsafe { *self.mr }.length,
-        );
+        let start = match bounds.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match bounds.end_bound() {
+            Bound::Included(&n) => n + 1,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => self.count,
+        };
+        assert!(start <= end);
+        let s_addr = unsafe { self.as_ptr().add(start) } as u64;
+        let e_addr = unsafe { self.as_ptr().add(end) } as u64;
+
         let sge = ffi::ibv_sge {
-            addr,
-            length,
+            addr: s_addr,
+            length: (e_addr - s_addr) as u32,
             lkey: unsafe { *self.mr }.lkey,
         };
         LocalMemorySlice { _sge: sge }
@@ -1540,19 +1549,19 @@ impl<T> MemoryRegion<T> {
     }
 
     pub fn length(&self) -> usize {
-        self.length
+        self.count
     }
 
     pub fn as_slice(&self) -> &[T] {
-        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.length) }
+        unsafe { std::slice::from_raw_parts(self.as_ptr(), self.count) }
     }
 
     pub fn as_mut_slice(&mut self) -> &mut [T] {
-        unsafe { std::slice::from_raw_parts_mut(self.as_ptr(), self.length) }
+        unsafe { std::slice::from_raw_parts_mut(self.as_ptr(), self.count) }
     }
 
     pub fn get(&self, index: usize) -> Option<&T> {
-        if index < self.length {
+        if index < self.count {
             unsafe { Some(&*self.as_ptr().add(index)) }
         } else {
             None
@@ -1560,7 +1569,7 @@ impl<T> MemoryRegion<T> {
     }
 
     pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        if index < self.length {
+        if index < self.count {
             unsafe { Some(&mut *self.as_ptr().add(index)) }
         } else {
             None
@@ -1568,8 +1577,8 @@ impl<T> MemoryRegion<T> {
     }
 
     pub fn cast<U>(self) -> MemoryRegion<U> {
-        assert_eq!(self.length * size_of::<T>() % size_of::<U>(), 0);
-        let length = self.length * size_of::<T>() / size_of::<U>();
+        assert_eq!(self.count * size_of::<T>() % size_of::<U>(), 0);
+        let length = self.count * size_of::<T>() / size_of::<U>();
         let ptr = self.ptr.cast::<U>();
         let mr = self.mr;
         let pd = self._pd.clone();
@@ -1578,7 +1587,7 @@ impl<T> MemoryRegion<T> {
 
         MemoryRegion {
             ptr,
-            length,
+            count: length,
             mr,
             _pd: pd,
         }
@@ -1617,12 +1626,12 @@ impl<T> Drop for MemoryRegion<T> {
     fn drop(&mut self) {
         unsafe {
             let errno = ffi::ibv_dereg_mr(self.mr);
-            let size = self.length * size_of::<T>();
+            let size = self.count * size_of::<T>();
             let layout = Layout::from_size_align_unchecked(size, align_of::<T>());
             dealloc(self.ptr.as_ptr() as *mut u8, layout);
             if errno != 0 {
                 let e = io::Error::from_raw_os_error(errno);
-                panic!("{e}");
+                panic!("dereg_mr failed: {e}");
             }
         }
     }
@@ -1708,7 +1717,7 @@ impl Drop for ProtectionDomainInner {
         let errno = unsafe { ffi::ibv_dealloc_pd(self.pd) };
         if errno != 0 {
             let e = io::Error::from_raw_os_error(errno);
-            panic!("{e}");
+            panic!("dealloc_pd failed: {e}");
         }
     }
 }
@@ -1786,7 +1795,7 @@ impl ProtectionDomain {
 
         Ok(MemoryRegion {
             ptr,
-            length,
+            count,
             mr,
             _pd: self.inner.clone(),
         })
@@ -1960,7 +1969,7 @@ impl QueuePair {
     #[inline]
     /// Remote RDMA write.
     /// immediate data can be used to signal the completion of the write operation
-    /// the other side uses post_recv on a dummy buffer and get the imm data from the work completion
+    /// the other side puses post_recv on a dummy buffer and get the imm data from the work completion
     pub fn post_write(
         &mut self,
         local: &[LocalMemorySlice],
@@ -2045,7 +2054,7 @@ impl Drop for QueuePair {
         let errno = unsafe { ffi::ibv_destroy_qp(self.qp) };
         if errno != 0 {
             let e = io::Error::from_raw_os_error(errno);
-            panic!("{e}");
+            panic!("destroy_qp failed: {e}");
         }
     }
 }

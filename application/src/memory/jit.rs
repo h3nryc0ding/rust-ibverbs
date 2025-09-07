@@ -2,6 +2,7 @@ use crate::memory::{MemoryHandle, MemoryProvider};
 use ibverbs::ProtectionDomain;
 use std::io;
 use std::sync::Arc;
+use tracing::instrument;
 
 #[derive(Clone)]
 pub struct JitProvider {
@@ -15,6 +16,7 @@ impl JitProvider {
 }
 
 impl MemoryProvider for JitProvider {
+    #[instrument(skip(self), name = "JitProvider::allocate", ret, err)]
     fn allocate<T: 'static>(&self, count: usize) -> io::Result<MemoryHandle<T>> {
         let mr = self.pd.allocate(count)?;
 
