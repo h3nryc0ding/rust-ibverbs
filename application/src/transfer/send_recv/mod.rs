@@ -1,3 +1,4 @@
+use crate::memory::Provider;
 use crate::transfer::Protocol;
 use crate::transfer::send_recv::client::SendRecvClient;
 use crate::transfer::send_recv::server::SendRecvServer;
@@ -8,19 +9,12 @@ pub mod server;
 pub struct SendRecvProtocol;
 
 impl Protocol for SendRecvProtocol {
-    type Client = SendRecvClient;
-    type Server = SendRecvServer;
+    type Client<M: Provider> = SendRecvClient<M>;
+    type Server<M: Provider> = SendRecvServer<M>;
 }
 
 #[repr(C)]
 #[derive(Debug, Default, Clone)]
-pub struct ServerMeta {
-    size: usize,
-}
-
-#[repr(C)]
-#[derive(Debug, Default, Clone)]
-pub struct ClientMeta {
-    addr: usize,
-    rkey: usize,
+struct ServerMeta {
+    size: u64,
 }

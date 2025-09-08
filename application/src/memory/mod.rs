@@ -1,14 +1,18 @@
 pub mod jit;
 pub mod pooled;
 
-use ibverbs::MemoryRegion;
+use ibverbs::{MemoryRegion, ProtectionDomain};
 use std::fmt::{Debug, Formatter};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
 use std::{any, io, mem};
+use std::sync::Arc;
 use tracing::instrument;
 
-pub trait MemoryProvider {
+pub trait Provider {
+    fn new(pd: Arc<ProtectionDomain>) -> io::Result<Self>
+    where
+        Self: Sized;
     fn allocate<T: 'static>(&self, count: usize) -> io::Result<MemoryHandle<T>>;
 }
 

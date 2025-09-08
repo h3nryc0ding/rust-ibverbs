@@ -1,4 +1,4 @@
-use crate::memory::{MemoryHandle, MemoryProvider};
+use crate::memory::{MemoryHandle, Provider};
 use ibverbs::{MemoryRegion, ProtectionDomain};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -12,13 +12,7 @@ pub struct PooledProvider {
 }
 
 impl PooledProvider {
-    pub fn new(pd: Arc<ProtectionDomain>) -> Self {
-        Self {
-            pd,
-            pools: Arc::new(Mutex::new(HashMap::new())),
-        }
-    }
-
+    #[instrument(skip(self), name = "PooledProvider::preallocate", ret, err)]
     pub fn preallocate<T: 'static>(&self, count: usize, num: usize) -> io::Result<()> {
         let mut pools = self.pools.lock().unwrap();
         let pool = pools
@@ -32,7 +26,14 @@ impl PooledProvider {
     }
 }
 
-impl MemoryProvider for PooledProvider {
+impl Provider for PooledProvider {
+    fn new(pd: Arc<ProtectionDomain>) -> io::Result<Self> {
+        Ok(Self {
+            pd,
+            pools: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
     #[instrument(skip(self), name = "PooledProvider::allocate", ret, err)]
     fn allocate<T: 'static>(&self, count: usize) -> io::Result<MemoryHandle<T>> {
         let size = count * size_of::<T>();

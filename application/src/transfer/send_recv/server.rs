@@ -1,97 +1,74 @@
-use crate::memory::jit::JitProvider;
-use crate::memory::pooled::PooledProvider;
-use crate::memory::{MemoryHandle, MemoryProvider};
-use crate::transfer::send_recv::{ClientMeta, ServerMeta};
-use crate::transfer::{SERVER_SIZE, Server, await_completions};
-use ibverbs::{CompletionQueue, Context, ProtectionDomain, QueuePair, ibv_qp_type};
+use crate::memory::{MemoryHandle, Provider};
+use crate::transfer::send_recv::ServerMeta;
+use crate::transfer::{SERVER_SIZE, SIZE_SEED, Server, await_completions, handshake, synchronize};
+use ibverbs::{CompletionQueue, Context, ProtectionDomain, QueuePair};
 use rand::Rng;
 use rand_chacha::ChaCha8Rng;
 use rand_chacha::rand_core::SeedableRng;
 use std::io;
-use std::io::{Read, Write};
 use std::net::{TcpListener, ToSocketAddrs};
 use std::sync::Arc;
+use tracing::instrument;
 
-pub struct SendRecvServer {
+pub struct SendRecvServer<M: Provider> {
     ctx: Context,
     pd: Arc<ProtectionDomain>,
     cq: CompletionQueue,
     qp: QueuePair,
 
-    jit_provider: JitProvider,
-    pooled_provider: PooledProvider,
-
+    provider: M,
     s_res: MemoryHandle<u8>,
 }
 
-impl Server for SendRecvServer {
-    fn new<A: ToSocketAddrs>(addr: A) -> io::Result<Self> {
+impl<M: Provider> Server<M> for SendRecvServer<M> {
+    fn new(addr: impl ToSocketAddrs) -> io::Result<Self> {
         let ctx = ibverbs::devices()?
             .get(0)
             .expect("No IB devices found")
             .open()?;
-        let pd = Arc::new(ctx.alloc_pd()?);
-        let cq = ctx.create_cq(4096, 0)?;
 
-        let jit_provider = JitProvider::new(pd.clone());
-        let pooled_provider = PooledProvider::new(pd.clone());
-        let s_res: MemoryHandle<u8> = pooled_provider.allocate(SERVER_SIZE)?;
+        let listener = TcpListener::bind(addr)?;
+        let (mut stream, _) = listener.accept()?;
+        let (pd, cq, qp) = handshake(&ctx, &mut stream)?;
+        let pd = Arc::new(pd);
 
-        let qp = {
-            let qpb = pd
-                .create_qp(&cq, &cq, ibv_qp_type::IBV_QPT_RC)?
-                .allow_remote_rw()
-                .build()?;
-            let local = qpb.endpoint()?;
-            let data = serde_json::to_vec(&local)?;
-            let mut buf = [0u8; 1024];
-            let n = {
-                let listener = TcpListener::bind(addr).unwrap();
-                let (mut stream, _) = listener.accept()?;
-                stream.write_all(&data)?;
-                stream.read(&mut buf)?
-            };
-            let remote = serde_json::from_slice(&buf[..n])?;
-            qpb.handshake(remote)?
-        };
+        let provider = M::new(pd.clone())?;
+        let s_res: MemoryHandle<u8> = provider.allocate(SERVER_SIZE)?;
 
+        synchronize(&mut stream)?;
         Ok(Self {
             ctx,
             pd,
             cq,
             qp,
-            jit_provider,
-            pooled_provider,
+            provider,
             s_res,
         })
     }
 
+    #[instrument(skip(self), ret, err)]
     fn serve(&mut self) -> io::Result<()> {
         let mut id = 0;
-        let mut rng = ChaCha8Rng::seed_from_u64(1337);
+        let mut rng = ChaCha8Rng::seed_from_u64(SIZE_SEED);
         loop {
             let size = rng.random_range(0..SERVER_SIZE);
 
-            let c_req: MemoryHandle<u8> = self.pooled_provider.allocate(1)?;
+            let c_req: MemoryHandle<u8> = self.provider.allocate(1)?;
             let local = c_req.slice(..);
             unsafe { self.qp.post_receive(&[local], id)? }
             await_completions::<1>(&mut self.cq)?;
 
-            let mut s_met: MemoryHandle<ServerMeta> = self.pooled_provider.allocate(1)?;
-            s_met[0].size = size;
+            let mut s_met: MemoryHandle<ServerMeta> = self.provider.allocate(1)?;
+            s_met[0].size = size as u64;
 
-            let c_met: MemoryHandle<ClientMeta> = self.pooled_provider.allocate(1)?;
-            let local = c_met.slice(..);
-            unsafe { self.qp.post_receive(&[local], id)? }
             let local = s_met.slice(..);
-            unsafe { self.qp.post_send(&[local], id, None)? }
-            await_completions::<2>(&mut self.cq)?;
-
+            unsafe { self.qp.post_send(&[local], id + 1, None)? }
+            await_completions::<1>(&mut self.cq)?; // TODO: don't wait for this completion
             let local = self.s_res.slice(..size);
-            unsafe { self.qp.post_send(&[local], id, None)? }
+            unsafe { self.qp.post_send(&[local], id + 2, None)? }
             await_completions::<1>(&mut self.cq)?;
 
-            id += 1;
+            id += 3;
         }
     }
 }

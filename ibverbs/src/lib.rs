@@ -1677,14 +1677,13 @@ pub struct RemoteMemoryRegion {
     pub rkey: u32,
 }
 
-#[allow(clippy::len_without_is_empty)]
 impl RemoteMemoryRegion {
     /// Make a subslice of this slice.
     pub fn slice(&self, bounds: impl RangeBounds<usize>) -> RemoteMemorySlice {
-        let (addr, len) = calc_addr_len(&bounds, self.addr, self.len);
+        let (addr, length) = calc_addr_len(&bounds, self.addr, self.len);
         RemoteMemorySlice {
             addr,
-            length: len,
+            length,
             rkey: self.rkey,
         }
     }
@@ -1694,9 +1693,23 @@ impl RemoteMemoryRegion {
 #[derive(Debug, Default, Copy, Clone)]
 pub struct RemoteMemorySlice {
     addr: u64,
-    #[allow(unused)]
     length: u32,
     rkey: u32,
+}
+
+impl RemoteMemorySlice {
+    pub fn addr(&self) -> u64 {
+        self.addr
+    }
+    pub fn len(&self) -> usize {
+        self.length as usize
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+    pub fn rkey(&self) -> u32 {
+        self.rkey
+    }
 }
 
 /// A key that authorizes direct memory access to a memory region.
@@ -1970,7 +1983,7 @@ impl QueuePair {
     /// Remote RDMA write.
     /// immediate data can be used to signal the completion of the write operation
     /// the other side puses post_recv on a dummy buffer and get the imm data from the work completion
-    pub fn post_write(
+    pub unsafe fn post_write(
         &mut self,
         local: &[LocalMemorySlice],
         remote: RemoteMemorySlice,
@@ -1989,7 +2002,7 @@ impl QueuePair {
     #[inline]
     /// Remote RDMA read.
     /// RDMA read does not support immediate data.
-    pub fn post_read(
+    pub unsafe fn post_read(
         &mut self,
         local: &[LocalMemorySlice],
         remote: RemoteMemorySlice,
@@ -2000,7 +2013,7 @@ impl QueuePair {
     }
 
     // internal function to do one sided communication
-    fn _post_one_sided(
+    unsafe fn _post_one_sided(
         &mut self,
         local: &[LocalMemorySlice],
         remote: RemoteMemorySlice,
