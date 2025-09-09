@@ -12,9 +12,6 @@ mod send_recv_write;
 pub use send_recv::SendRecvProtocol;
 pub use send_recv_read::SendRecvReadProtocol;
 
-const SERVER_SIZE: usize = 1 * 2usize.pow(30); // 1 GiB
-const SIZE_SEED: u64 = 1337;
-
 pub trait Protocol {
     type Client<M: Provider>: Client<M>;
     type Server<M: Provider>: Server<M>;

@@ -1,8 +1,13 @@
 use application::memory::Provider;
+use application::memory::ideal::IdealProvider;
 use application::memory::jit::JitProvider;
 use application::memory::pooled::PooledProvider;
 use application::transfer::{Client, Protocol, SendRecvProtocol, SendRecvReadProtocol, Server};
+use application::{REQUEST_COUNT, REQUEST_SIZE_SEED};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha8Rng;
 use std::net::{IpAddr, ToSocketAddrs};
+use std::sync::{Arc, Mutex};
 use std::{io, thread, time};
 use tracing::{Level, info, info_span};
 
@@ -28,6 +33,7 @@ enum TransferProtocol {
 enum MemoryProvider {
     Jit,
     Pooled,
+    Ideal,
 }
 
 fn main() -> io::Result<()> {
@@ -51,6 +57,7 @@ fn dispatch_provider<P: Protocol>(args: Args) -> io::Result<()> {
     match args.memory_provider {
         MemoryProvider::Jit => execute::<P, JitProvider>(args),
         MemoryProvider::Pooled => execute::<P, PooledProvider>(args),
+        MemoryProvider::Ideal => execute::<P, IdealProvider>(args),
     }
 }
 
@@ -69,14 +76,13 @@ fn run_server<P: Protocol, M: Provider>(addr: impl ToSocketAddrs) -> io::Result<
 }
 
 fn run_client<P: Protocol, M: Provider>(addr: impl ToSocketAddrs) -> io::Result<()> {
-    const REQUESTS: usize = 64;
-
     let mut client: <P>::Client<M> = Client::new(addr)?;
     info!("Client started. Sending requests...");
 
     let start = time::Instant::now();
     let mut received = 0;
-    for i in 0..REQUESTS {
+    let rng = Arc::new(Mutex::new(ChaCha8Rng::seed_from_u64(REQUEST_SIZE_SEED)));
+    for i in 0..REQUEST_COUNT {
         let span = info_span!("request", request_id = i);
         let _enter = span.enter();
 
@@ -86,9 +92,16 @@ fn run_client<P: Protocol, M: Provider>(addr: impl ToSocketAddrs) -> io::Result<
         info!("Received response: {:?}", res);
         received += res.len();
 
+        let rng = Arc::clone(&rng);
         thread::spawn(move || {
-            let xor = res.iter().fold(0, |acc, &b| acc ^ b);
-            info!("Checksum: {}", xor);
+            let mut rng = rng.lock().unwrap();
+
+            let expected_size = rng.random_range(0..1 * 2usize.pow(30));
+            let expected: Vec<u8> = (0..expected_size).map(|i| (i % 256) as u8).collect();
+            let expected_xor = expected.iter().fold(0u8, |acc, &x| acc ^ x);
+
+            assert_eq!(expected_size, res.len());
+            assert_eq!(expected_xor, res.iter().fold(0u8, |acc, &x| acc ^ x));
         });
     }
     let duration = start.elapsed();

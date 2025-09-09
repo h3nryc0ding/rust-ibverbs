@@ -1508,10 +1508,10 @@ impl<T> MemoryRegion<T> {
     }
 
     /// Remote region.
-    pub fn remote(&self) -> RemoteMemoryRegion {
+    pub fn remote(&self) -> RemoteMemoryRegion<T> {
         RemoteMemoryRegion {
-            addr: unsafe { *self.mr }.addr as u64,
-            len: unsafe { *self.mr }.length,
+            addr: self.ptr,
+            count: self.count,
             rkey: unsafe { *self.mr }.rkey,
         }
     }
@@ -1548,8 +1548,20 @@ impl<T> MemoryRegion<T> {
         self.ptr.as_ptr()
     }
 
-    pub fn length(&self) -> usize {
+    /// Length of underlying MemoryRegion in bytes
+    pub unsafe fn length(&self) -> usize {
+        (*self.mr).length
+    }
+
+    /// Count of T elements in this MemoryRegion
+    pub fn count(&self) -> usize {
         self.count
+    }
+
+    /// Set count of T elements in this MemoryRegion
+    pub fn set_count(&mut self, count: usize) {
+        assert!(count <= unsafe { (*self.mr).length } / size_of::<T>());
+        self.count = count;
     }
 
     pub fn as_slice(&self) -> &[T] {
@@ -1578,7 +1590,7 @@ impl<T> MemoryRegion<T> {
 
     pub fn cast<U>(self) -> MemoryRegion<U> {
         assert_eq!(self.count * size_of::<T>() % size_of::<U>(), 0);
-        let length = self.count * size_of::<T>() / size_of::<U>();
+        let count = self.count * size_of::<T>() / size_of::<U>();
         let ptr = self.ptr.cast::<U>();
         let mr = self.mr;
         let pd = self._pd.clone();
@@ -1587,7 +1599,7 @@ impl<T> MemoryRegion<T> {
 
         MemoryRegion {
             ptr,
-            count: length,
+            count,
             mr,
             _pd: pd,
         }
@@ -1626,9 +1638,10 @@ impl<T> Drop for MemoryRegion<T> {
     fn drop(&mut self) {
         unsafe {
             let errno = ffi::ibv_dereg_mr(self.mr);
-            let size = self.count * size_of::<T>();
-            let layout = Layout::from_size_align_unchecked(size, align_of::<T>());
-            dealloc(self.ptr.as_ptr() as *mut u8, layout);
+            let addr = (*self.mr).addr;
+            let length = (*self.mr).length;
+            let layout = Layout::from_size_align_unchecked(length, align_of::<u8>());
+            dealloc(addr as *mut u8, layout);
             if errno != 0 {
                 let e = io::Error::from_raw_os_error(errno);
                 panic!("dereg_mr failed: {e}");
@@ -1667,23 +1680,32 @@ impl LocalMemorySlice {
 }
 
 /// Remote memory region.
-#[cfg_attr(feature = "serde", derive(Serialize, Deserialize, Debug, Clone))]
-pub struct RemoteMemoryRegion {
-    /// Memory address of the registered region.
-    pub addr: u64,
-    /// Length of the registered memory region.
-    pub len: usize,
-    /// Remote key for accessing this memory region.
-    pub rkey: u32,
+pub struct RemoteMemoryRegion<T = u8> {
+    addr: NonNull<T>,
+    count: usize,
+    rkey: u32,
 }
 
 impl RemoteMemoryRegion {
     /// Make a subslice of this slice.
     pub fn slice(&self, bounds: impl RangeBounds<usize>) -> RemoteMemorySlice {
-        let (addr, length) = calc_addr_len(&bounds, self.addr, self.len);
+        let start = match bounds.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match bounds.end_bound() {
+            Bound::Included(&n) => n + 1,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => self.count,
+        };
+        assert!(start <= end);
+        let s_addr = unsafe { self.addr.as_ptr().add(start) } as u64;
+        let e_addr = unsafe { self.addr.as_ptr().add(end) } as u64;
+
         RemoteMemorySlice {
-            addr,
-            length,
+            addr: s_addr,
+            length: (e_addr - s_addr) as u32,
             rkey: self.rkey,
         }
     }
@@ -1790,8 +1812,7 @@ impl ProtectionDomain {
             ));
         }
 
-        let ptr = unsafe { NonNull::new_unchecked(ptr as *mut T) };
-
+        let ptr = unsafe { NonNull::new_unchecked(ptr) };
         let mr = unsafe {
             ffi::ibv_reg_mr(
                 self.inner.pd,
@@ -2070,25 +2091,6 @@ impl Drop for QueuePair {
             panic!("destroy_qp failed: {e}");
         }
     }
-}
-
-fn calc_addr_len(bounds: &impl RangeBounds<usize>, addr: u64, bytes_len: usize) -> (u64, u32) {
-    let start = match bounds.start_bound() {
-        std::ops::Bound::Included(i) => *i,
-        std::ops::Bound::Excluded(i) => *i + 1,
-        std::ops::Bound::Unbounded => 0,
-    };
-    let end = match bounds.end_bound() {
-        std::ops::Bound::Included(i) => *i + 1,
-        std::ops::Bound::Excluded(i) => *i,
-        std::ops::Bound::Unbounded => bytes_len,
-    };
-    assert!(start < end);
-    assert!(start <= bytes_len);
-    assert!(end <= bytes_len);
-    let addr = addr + start as u64;
-    let len: u32 = (end - start).try_into().unwrap();
-    (addr, len)
 }
 
 #[cfg(all(test, feature = "serde"))]

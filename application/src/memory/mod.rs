@@ -1,12 +1,13 @@
 pub mod jit;
 pub mod pooled;
+pub mod ideal;
 
 use ibverbs::{MemoryRegion, ProtectionDomain};
 use std::fmt::{Debug, Formatter};
 use std::mem::ManuallyDrop;
 use std::ops::{Deref, DerefMut};
-use std::{any, io, mem};
 use std::sync::Arc;
+use std::{any, io, mem};
 use tracing::instrument;
 
 pub trait Provider {
@@ -77,7 +78,7 @@ impl<T> Debug for MemoryHandle<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MemoryHandle")
             .field("ptr", &self.mr.ptr())
-            .field("length", &self.mr.length())
+            .field("count", &self.mr.count())
             .field("type", &any::type_name::<T>())
             .finish()
     }

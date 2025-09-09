@@ -1,6 +1,7 @@
 use crate::memory::{MemoryHandle, Provider};
 use crate::transfer::send_recv_read::ServerMeta;
-use crate::transfer::{SERVER_SIZE, SIZE_SEED, Server, await_completions, handshake, synchronize};
+use crate::transfer::{Server, await_completions, handshake, synchronize};
+use crate::{REQUEST_SIZE_MAX, REQUEST_SIZE_SEED};
 use ibverbs::{CompletionQueue, Context, ProtectionDomain, QueuePair};
 use rand::{Rng, SeedableRng};
 use rand_chacha::ChaCha8Rng;
@@ -31,7 +32,11 @@ impl<M: Provider> Server<M> for SendRecvReadServer<M> {
         let pd = Arc::new(pd);
 
         let provider = M::new(pd.clone())?;
-        let s_res: MemoryHandle<u8> = provider.allocate(SERVER_SIZE)?;
+        let mut s_res: MemoryHandle<u8> = provider.allocate(REQUEST_SIZE_MAX)?;
+
+        for i in 0..REQUEST_SIZE_MAX {
+            s_res[i] = i as u8;
+        }
 
         synchronize(&mut stream)?;
         Ok(Self {
@@ -46,9 +51,9 @@ impl<M: Provider> Server<M> for SendRecvReadServer<M> {
 
     fn serve(&mut self) -> io::Result<()> {
         let mut id = 0;
-        let mut rng = ChaCha8Rng::seed_from_u64(SIZE_SEED);
+        let mut rng = ChaCha8Rng::seed_from_u64(REQUEST_SIZE_SEED);
         loop {
-            let size = rng.random_range(0..SERVER_SIZE);
+            let size = rng.random_range(0..REQUEST_SIZE_MAX);
 
             let c_req: MemoryHandle<u8> = self.provider.allocate(1)?;
             let local = c_req.slice(..);
