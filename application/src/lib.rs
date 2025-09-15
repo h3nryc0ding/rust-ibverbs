@@ -1,8 +1,12 @@
-// TODO: remove in final version
-#![allow(dead_code, unused_variables)]
-pub mod memory;
-pub mod transfer;
+use bincode::config::standard;
 
-pub const REQUEST_SIZE_MAX: usize = 1 * 2usize.pow(30);
-pub const REQUEST_SIZE_SEED: u64 = 1337;
-pub const REQUEST_COUNT: usize = 16;
+pub mod client;
+mod memory;
+pub mod server;
+
+pub static KB: usize = 1024;
+pub static MB: usize = 1024 * KB;
+pub static GB: usize = 1024 * MB;
+
+pub const SERVER_DATA_SIZE: usize = 16 * GB;
+pub const BINCODE_CONFIG: bincode::config::Configuration = standard();

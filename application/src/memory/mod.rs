@@ -1,6 +1,5 @@
 pub mod jit;
 pub mod pooled;
-pub mod ideal;
 
 use ibverbs::{MemoryRegion, ProtectionDomain};
 use std::fmt::{Debug, Formatter};
@@ -14,7 +13,7 @@ pub trait Provider {
     fn new(pd: Arc<ProtectionDomain>) -> io::Result<Self>
     where
         Self: Sized;
-    fn allocate<T: 'static>(&self, count: usize) -> io::Result<MemoryHandle<T>>;
+    fn allocate<T: 'static + Default>(&self, count: usize) -> io::Result<MemoryHandle<T>>;
 }
 
 pub struct MemoryHandle<T = u8> {
@@ -44,7 +43,7 @@ impl<T: 'static> MemoryHandle<T> {
         MemoryHandle {
             mr: ManuallyDrop::new(mr),
             cleanup: Box::new(|mr| {
-                let mr = mr.cast::<T>();
+                let mr = unsafe { mr.cast::<T>() };
                 cleanup(mr);
             }),
         }
@@ -76,10 +75,12 @@ impl<T> Drop for MemoryHandle<T> {
 
 impl<T> Debug for MemoryHandle<T> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("MemoryHandle")
-            .field("ptr", &self.mr.ptr())
-            .field("count", &self.mr.count())
-            .field("type", &any::type_name::<T>())
-            .finish()
+        unsafe {
+            f.debug_struct("MemoryHandle")
+                .field("addr", &self.mr.addr())
+                .field("length", &self.mr.length())
+                .field("type", &any::type_name::<T>())
+                .finish()
+        }
     }
 }

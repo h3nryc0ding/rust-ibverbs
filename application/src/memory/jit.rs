@@ -15,7 +15,7 @@ impl Provider for JitProvider {
     }
 
     #[instrument(skip(self), name = "JitProvider::allocate", ret, err)]
-    fn allocate<T: 'static>(&self, count: usize) -> io::Result<MemoryHandle<T>> {
+    fn allocate<T: 'static + Default>(&self, count: usize) -> io::Result<MemoryHandle<T>> {
         let mr = self.pd.allocate(count)?;
 
         let cleanup = |mr| {
