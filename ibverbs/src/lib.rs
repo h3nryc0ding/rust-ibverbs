@@ -67,9 +67,9 @@
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::fmt::Debug;
-use std::io;
+use std::{io, mem};
 use std::mem::ManuallyDrop;
-use std::ops::{Bound, Deref, DerefMut, Index, IndexMut, RangeBounds};
+use std::ops::{Bound, Deref, DerefMut, RangeBounds};
 use std::os::fd::BorrowedFd;
 use std::os::raw::c_void;
 use std::sync::Arc;
@@ -1487,39 +1487,12 @@ impl PreparedQueuePair {
     }
 }
 
-/// A memory region that has been registered for use with RDMA.
-pub struct MemoryRegion<T = u8> {
-    data: Box<[T]>,
-    mr: *mut ffi::ibv_mr,
-    _pd: Arc<ProtectionDomainInner>,
-}
-
-unsafe impl<T> Send for MemoryRegion<T> {}
-unsafe impl<T> Sync for MemoryRegion<T> {}
-
-impl<T> MemoryRegion<T> {
-    pub fn rkey(&self) -> u32 {
-        unsafe { (*self.mr).rkey }
-    }
-
-    pub fn lkey(&self) -> u32 {
-        unsafe { (*self.mr).lkey }
-    }
-
-    pub fn length(&self) -> usize {
-        unsafe { (*self.mr).length }
-    }
-
-    pub unsafe fn addr(&self) -> *const T {
-        (*self.mr).addr as *const T
-    }
-
-    pub fn remote(&self) -> RemoteMemoryRegion<'_, T> {
-        RemoteMemoryRegion(self)
-    }
-
-    /// Make a subslice of this memory region.
-    pub fn slice(&self, bounds: impl RangeBounds<usize>) -> LocalMemorySlice {
+pub trait MemoryRegion<T = u8> {
+    fn lkey(&self) -> u32;
+    fn rkey(&self) -> u32;
+    fn addr(&self) -> *const T;
+    fn length(&self) -> usize;
+    fn slice_local(&self, bounds: impl RangeBounds<usize>) -> LocalMemorySlice {
         let start = match bounds.start_bound() {
             Bound::Included(&n) => n,
             Bound::Excluded(&n) => n + 1,
@@ -1528,70 +1501,101 @@ impl<T> MemoryRegion<T> {
         let end = match bounds.end_bound() {
             Bound::Included(&n) => n + 1,
             Bound::Excluded(&n) => n,
-            Bound::Unbounded => self.len(),
+            Bound::Unbounded => self.length() / size_of::<T>(),
         };
         assert!(start <= end);
+        let start_addr = unsafe { self.addr().add(start) } as u64;
+        let end_addr = unsafe { self.addr().add(end) } as u64;
+        let length = end_addr - start_addr;
+        // TODO: assert length <= self.length()
         LocalMemorySlice {
             _sge: ffi::ibv_sge {
-                addr: unsafe { self.addr().add(start) } as u64,
-                length: (end - start) as u32,
+                addr: start_addr,
+                length: length as u32,
                 lkey: self.lkey(),
             },
         }
     }
-
-    pub fn len(&self) -> usize {
-        self.data.len()
-    }
-
-    pub fn as_slice(&self) -> &[T] {
-        &self.data
-    }
-
-    pub fn as_mut_slice(&mut self) -> &mut [T] {
-        self.data.as_mut()
-    }
-
-    pub fn get(&self, index: usize) -> Option<&T> {
-        self.data.get(index)
-    }
-
-    pub fn get_mut(&mut self, index: usize) -> Option<&mut T> {
-        self.data.get_mut(index)
-    }
-
-    pub fn try_cast<U>(self) -> io::Result<MemoryRegion<U>> {
-        let this = ManuallyDrop::new(self);
-
-        let bytes = this.data.len() * size_of::<T>();
-
-        if bytes % size_of::<U>() != 0 {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "size mismatch"));
+    fn slice_remote(&self, bounds: impl RangeBounds<usize>) -> RemoteMemorySlice {
+        let start = match bounds.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match bounds.end_bound() {
+            Bound::Included(&n) => n + 1,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => self.length() / size_of::<T>(),
+        };
+        assert!(start <= end);
+        let start_addr = unsafe { self.addr().add(start) } as u64;
+        let end_addr = unsafe { self.addr().add(end) } as u64;
+        let length = (end_addr - start_addr)
+            .try_into()
+            .expect("memory region slice length exceeds u32::MAX");
+        // TODO: assert length <= self.length()
+        RemoteMemorySlice {
+            addr: start_addr,
+            length,
+            rkey: self.rkey(),
         }
-        if (this.data.as_ptr() as usize) % align_of::<U>() != 0 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "alignment mismatch",
-            ));
-        }
+    }
+}
 
-        let data = unsafe { ptr::read(&this.data) };
-        let raw_ptr = Box::into_raw(data) as *mut U;
-        let data =
-            unsafe { Box::from_raw(slice::from_raw_parts_mut(raw_ptr, bytes / size_of::<U>())) };
-        let mr = this.mr;
-        let _pd = this._pd.clone();
-        Ok(MemoryRegion { data, mr, _pd })
+pub struct OwnedMemoryRegion<T = u8> {
+    data: Box<[T]>,
+    mr: *mut ffi::ibv_mr,
+    _pd: Arc<ProtectionDomainInner>,
+}
+
+pub struct BorrowedMemoryRegion<'data, T = u8> {
+    data: &'data mut [T],
+    mr: *mut ffi::ibv_mr,
+    _pd: Arc<ProtectionDomainInner>,
+}
+
+impl<T> MemoryRegion<T> for OwnedMemoryRegion<T> {
+    fn lkey(&self) -> u32 {
+        unsafe { (*self.mr).lkey }
     }
 
-    pub fn cast<U>(self) -> MemoryRegion<U> {
-        self.try_cast().unwrap()
+    fn rkey(&self) -> u32 {
+        unsafe { (*self.mr).rkey }
     }
 
+    fn addr(&self) -> *const T {
+        self.data.as_ptr()
+    }
+
+    fn length(&self) -> usize {
+        unsafe { (*self.mr).length }
+    }
+}
+
+impl<T> MemoryRegion<T> for BorrowedMemoryRegion<'_, T> {
+    fn lkey(&self) -> u32 {
+        unsafe { (*self.mr).lkey }
+    }
+
+    fn rkey(&self) -> u32 {
+        unsafe { (*self.mr).rkey }
+    }
+
+    fn addr(&self) -> *const T {
+        self.data.as_ptr()
+    }
+
+    fn length(&self) -> usize {
+        unsafe { (*self.mr).length }
+    }
+}
+
+impl<T> OwnedMemoryRegion<T> {
     pub fn deregister(self) -> io::Result<Box<[T]>> {
         let this = ManuallyDrop::new(self);
         let data = unsafe { ptr::read(&this.data) };
         let mr = this.mr;
+
         match unsafe { ffi::ibv_dereg_mr(mr) } {
             0 => Ok(data),
             errno => Err(io::Error::from_raw_os_error(errno)),
@@ -1599,35 +1603,53 @@ impl<T> MemoryRegion<T> {
     }
 }
 
-impl<T> Index<usize> for MemoryRegion<T> {
-    type Output = T;
+impl<'data, T> BorrowedMemoryRegion<'data, T> {
+    pub fn deregister(self) -> io::Result<&'data mut [T]> {
+        let this = ManuallyDrop::new(self);
+        let data = unsafe { ptr::read(&this.data) };
+        let mr = this.mr;
 
-    fn index(&self, index: usize) -> &Self::Output {
-        self.get(index).expect("index out of bounds")
+        match unsafe { ffi::ibv_dereg_mr(mr) } {
+            0 => Ok(data),
+            errno => Err(io::Error::from_raw_os_error(errno)),
+        }
     }
 }
 
-impl<T> IndexMut<usize> for MemoryRegion<T> {
-    fn index_mut(&mut self, index: usize) -> &mut Self::Output {
-        self.get_mut(index).expect("index out of bounds")
-    }
-}
-
-impl<T> Deref for MemoryRegion<T> {
+impl<T> Deref for OwnedMemoryRegion<T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
-        self.as_slice()
+        &self.data
     }
 }
 
-impl DerefMut for MemoryRegion {
+impl<T> Deref for BorrowedMemoryRegion<'_, T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        &self.data
+    }
+}
+
+impl<T> DerefMut for OwnedMemoryRegion<T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
-        self.as_mut_slice()
+        &mut self.data
     }
 }
 
-impl<T> Drop for MemoryRegion<T> {
+impl<T> Drop for OwnedMemoryRegion<T> {
+    fn drop(&mut self) {
+        unsafe {
+            let errno = ffi::ibv_dereg_mr(self.mr);
+            if errno != 0 {
+                panic!("dereg_mr failed: {}", io::Error::from_raw_os_error(errno));
+            }
+        }
+    }
+}
+
+impl<T> Drop for BorrowedMemoryRegion<'_, T> {
     fn drop(&mut self) {
         unsafe {
             let errno = ffi::ibv_dereg_mr(self.mr);
@@ -1664,34 +1686,6 @@ impl LocalMemorySlice {
     /// Get the remote key of the local memory slice.
     pub fn rkey(&self) -> u32 {
         self._sge.lkey
-    }
-}
-
-/// Remote memory region.
-pub struct RemoteMemoryRegion<'mr, T>(&'mr MemoryRegion<T>);
-
-impl<'mr, T> RemoteMemoryRegion<'mr, T> {
-    /// Make a subslice of this slice.
-    pub fn slice(&self, bounds: impl RangeBounds<usize>) -> RemoteMemorySlice {
-        let start = match bounds.start_bound() {
-            Bound::Included(&n) => n,
-            Bound::Excluded(&n) => n + 1,
-            Bound::Unbounded => 0,
-        };
-        let end = match bounds.end_bound() {
-            Bound::Included(&n) => n + 1,
-            Bound::Excluded(&n) => n,
-            Bound::Unbounded => self.0.len(),
-        };
-        assert!(start <= end);
-        let s_addr = unsafe { self.0.addr().add(start) } as u64;
-        let e_addr = unsafe { self.0.addr().add(end) } as u64;
-
-        RemoteMemorySlice {
-            addr: s_addr,
-            length: (e_addr - s_addr) as u32,
-            rkey: self.0.rkey(),
-        }
     }
 }
 
@@ -1776,13 +1770,10 @@ impl ProtectionDomain {
             1,
         ))
     }
-    pub fn allocate<T: Default>(&self, count: usize) -> io::Result<MemoryRegion<T>> {
+    pub fn allocate<T: Default>(&self, count: usize) -> io::Result<OwnedMemoryRegion<T>> {
         let mut vec = Vec::with_capacity(count);
         vec.resize_with(count, Default::default);
-        self.register(vec.into_boxed_slice())
-    }
-
-    pub fn register<T>(&self, data: Box<[T]>) -> io::Result<MemoryRegion<T>> {
+        let data = vec.into_boxed_slice();
         let addr = data.as_ptr() as *mut _;
         let length = data.len() * size_of::<T>();
         let mr =
@@ -1790,8 +1781,46 @@ impl ProtectionDomain {
         if mr.is_null() {
             Err(io::Error::last_os_error())
         } else {
-            Ok(MemoryRegion {
+            Ok(OwnedMemoryRegion {
                 data,
+                mr,
+                _pd: self.inner.clone(),
+            })
+        }
+    }
+
+    pub fn register<'data, T>(
+        &self,
+        data: &'data mut [T],
+    ) -> io::Result<BorrowedMemoryRegion<'data, T>> {
+        let addr = data.as_mut_ptr() as *mut _;
+        let length = data.len() * size_of::<T>();
+        let mr =
+            unsafe { ffi::ibv_reg_mr(self.inner.pd, addr, length, DEFAULT_ACCESS_FLAGS.0 as _) };
+        if mr.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(BorrowedMemoryRegion {
+                data,
+                mr,
+                _pd: self.inner.clone(),
+            })
+        }
+    }
+    
+    pub unsafe fn register_unchecked<'data, T>(
+        &self,
+        ptr: *mut T,
+        count: usize,
+    ) -> io::Result<BorrowedMemoryRegion<'data, T>> {
+        let addr = ptr as *mut _;
+        let length = count * size_of::<T>();
+        let mr = unsafe { ffi::ibv_reg_mr(self.inner.pd, addr, length, DEFAULT_ACCESS_FLAGS.0 as _) };
+        if mr.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(BorrowedMemoryRegion {
+                data: slice::from_raw_parts_mut(ptr, count),
                 mr,
                 _pd: self.inner.clone(),
             })

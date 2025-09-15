@@ -4,8 +4,11 @@ use ibverbs::ibv_qp_type::IBV_QPT_RC;
 use ibverbs::{
     CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair, RemoteMemorySlice, ibv_wc,
 };
+use std::cmp::min;
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
+use std::sync::mpsc;
 use tracing::{instrument, trace};
 
 pub struct Client {
@@ -51,7 +54,10 @@ impl Client {
     #[instrument(skip(self), err)]
     pub fn simple_request(&mut self, size: usize) -> io::Result<Box<[u8]>> {
         let local = self.pd.allocate(size)?;
-        unsafe { self.qp.post_read(&[local.slice(..)], self.remote, 0)? };
+        unsafe {
+            self.qp
+                .post_read(&[local.slice_local(..)], self.remote, 0)?
+        };
 
         let mut completed = false;
         let mut completions = [ibv_wc::default(); 1];
@@ -68,10 +74,72 @@ impl Client {
     }
 
     #[instrument(skip(self), err)]
-    pub fn spit_request(&mut self, size: usize) -> io::Result<Box<[u8]>> {
+    pub fn split_request(&mut self, size: usize) -> io::Result<Box<[u8]>> {
         static MR_SIZE: usize = 4 * MB;
-        let response = vec![0u8; size];
-        
-        let local = self.pd.register()?;
+        let mut result: Vec<u8> = Vec::with_capacity(size);
+        unsafe { result.set_len(size) };
+        let result_ptr = result.as_mut_ptr();
+
+        let chunks = (size + MR_SIZE - 1) / MR_SIZE;
+        let mut outstanding_mrs = HashMap::new();
+        let mut reg_queue = VecDeque::new();
+        let mut post_queue = VecDeque::new();
+
+        for i in 0..chunks {
+            let start = i * MR_SIZE;
+            let end = min(start + MR_SIZE, size);
+            let len = end - start;
+            let ptr = unsafe { result_ptr.add(start) };
+            reg_queue.push_back((i as u64, ptr, len));
+        }
+
+        while !reg_queue.is_empty() || !post_queue.is_empty() || !outstanding_mrs.is_empty() {
+            if let Some((id, ptr, len)) = reg_queue.pop_front() {
+                match unsafe { self.pd.register_unchecked::<u8>(ptr, len) } {
+                    Ok(mr) => {
+                        trace!("registered mr id={} ptr={:?} len={}", id, ptr, len);
+                        post_queue.push_back((id, mr))
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {
+                        trace!("registration OOM, retrying later");
+                        reg_queue.push_back((id, ptr, len));
+                    }
+                    Err(e) => panic!("register error: {:?}", e),
+                }
+            }
+
+            if let Some((id, mr)) = post_queue.pop_front() {
+                let local = mr.slice_local(..);
+                match unsafe { self.qp.post_read(&[local], self.remote, id) } {
+                    Ok(_) => {
+                        trace!("posted read id={} len={}", id, local.len());
+                        outstanding_mrs.insert(id, mr);
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {
+                        trace!("post_read OOM, retrying later");
+                        post_queue.push_back((id, mr));
+                    }
+                    Err(e) => panic!("post_read error: {:?}", e),
+                }
+            }
+
+            let mut completions = [ibv_wc::default(); 16];
+            for completion in self.cq.poll(&mut completions)? {
+                if let Some((e, _)) = completion.error() {
+                    panic!("wc error: {:?}", e)
+                }
+                let id = completion.wr_id();
+                if let Some(mr) = outstanding_mrs.remove(&id) {
+                    let ptr = mr.addr() as *mut u8;
+                    let len = mr.len();
+                    mr.deregister()?;
+                    trace!("registered mr id={} ptr={:?} len={}", &id, ptr, len);
+                } else {
+                    panic!("unknown wr_id: {}", id);
+                }
+            }
+        }
+
+        Ok(result.into_boxed_slice())
     }
 }

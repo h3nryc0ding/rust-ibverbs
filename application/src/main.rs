@@ -61,7 +61,7 @@ fn run_client(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<()> {
         let _enter = span.enter();
 
         info!("Sending");
-        let res = client.simple_request(size * MB)?;
+        let res = client.split_request(size * MB)?;
         info!("Received");
         received += res.len();
     }

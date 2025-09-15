@@ -1,7 +1,9 @@
 use crate::{BINCODE_CONFIG, SERVER_DATA_SIZE};
 use bincode::serde::{decode_from_std_read, encode_into_std_write};
 use ibverbs::ibv_qp_type::IBV_QPT_RC;
-use ibverbs::{CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair};
+use ibverbs::{
+    CompletionQueue, Context, MemoryRegion, OwnedMemoryRegion, ProtectionDomain, QueuePair,
+};
 use std::io;
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tracing::trace;
@@ -11,7 +13,7 @@ pub struct Server {
     pd: ProtectionDomain,
     cq: CompletionQueue,
     listener: TcpListener,
-    data: MemoryRegion<u8>,
+    data: OwnedMemoryRegion<u8>,
 }
 
 impl Server {
@@ -19,11 +21,10 @@ impl Server {
         let listener = TcpListener::bind(addr)?;
         let pd = ctx.alloc_pd()?;
         let cq = ctx.create_cq(1024, 0)?;
-        let mut buf = vec![0u8; SERVER_DATA_SIZE].into_boxed_slice();
+        let mut data = pd.allocate(SERVER_DATA_SIZE)?;
         for i in 0..SERVER_DATA_SIZE {
-            buf[i] = i as u8;
+            data[i] = i as u8;
         }
-        let data = pd.register(buf)?;
         Ok(Self {
             ctx,
             pd,
@@ -57,7 +58,7 @@ impl Server {
         trace!("Client remote endpoint: {:?}", remote);
         let qp = pqp.handshake(remote)?;
 
-        let remote = self.data.remote().slice(..);
+        let remote = self.data.slice_remote(..);
         encode_into_std_write(&remote, &mut stream, BINCODE_CONFIG).unwrap();
         trace!("Server remote slice: {:?}", remote);
 
