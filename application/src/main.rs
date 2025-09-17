@@ -1,6 +1,7 @@
 use application::MB;
 use application::client::Client;
 use application::server::Server;
+use application::transfer::{CopyStrategy, TransferStrategy};
 use ibverbs::Context;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::{io, time};
@@ -15,7 +16,7 @@ struct Args {
     #[arg(short, long, default_value_t = 18515)]
     port: u16,
 
-    #[arg(long, default_value_t = Level::DEBUG)]
+    #[arg(long, default_value_t = Level::TRACE)]
     log: Level,
 }
 
@@ -61,7 +62,7 @@ fn run_client(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<()> {
         let _enter = span.enter();
 
         info!("Sending");
-        let res = client.split_request(size * MB)?;
+        let res = CopyStrategy::request(&mut client, size * MB)?;
         info!("Received");
         received += res.len();
     }

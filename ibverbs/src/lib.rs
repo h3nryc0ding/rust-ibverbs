@@ -67,13 +67,13 @@
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::fmt::Debug;
-use std::{io, mem};
 use std::mem::ManuallyDrop;
 use std::ops::{Bound, Deref, DerefMut, RangeBounds};
 use std::os::fd::BorrowedFd;
 use std::os::raw::c_void;
 use std::sync::Arc;
 use std::time::Duration;
+use std::io;
 use std::{ptr, slice};
 
 const PORT_NUM: u8 = 1;
@@ -1540,6 +1540,10 @@ pub trait MemoryRegion<T = u8> {
             rkey: self.rkey(),
         }
     }
+
+    fn as_slice(&self) -> &[T] {
+        unsafe { slice::from_raw_parts(self.addr(), self.length() / size_of::<T>()) }
+    }
 }
 
 pub struct OwnedMemoryRegion<T = u8> {
@@ -1637,6 +1641,11 @@ impl<T> DerefMut for OwnedMemoryRegion<T> {
         &mut self.data
     }
 }
+unsafe impl<T> Send for BorrowedMemoryRegion<'_, T> {}
+unsafe impl<T> Sync for BorrowedMemoryRegion<'_, T> {}
+
+unsafe impl<T> Send for OwnedMemoryRegion<T> {}
+unsafe impl<T> Sync for OwnedMemoryRegion<T> {}
 
 impl<T> Drop for OwnedMemoryRegion<T> {
     fn drop(&mut self) {
@@ -1807,7 +1816,7 @@ impl ProtectionDomain {
             })
         }
     }
-    
+
     pub unsafe fn register_unchecked<'data, T>(
         &self,
         ptr: *mut T,
@@ -1815,7 +1824,8 @@ impl ProtectionDomain {
     ) -> io::Result<BorrowedMemoryRegion<'data, T>> {
         let addr = ptr as *mut _;
         let length = count * size_of::<T>();
-        let mr = unsafe { ffi::ibv_reg_mr(self.inner.pd, addr, length, DEFAULT_ACCESS_FLAGS.0 as _) };
+        let mr =
+            unsafe { ffi::ibv_reg_mr(self.inner.pd, addr, length, DEFAULT_ACCESS_FLAGS.0 as _) };
         if mr.is_null() {
             Err(io::Error::last_os_error())
         } else {
