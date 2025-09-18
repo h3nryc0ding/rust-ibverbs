@@ -9,6 +9,7 @@ use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tracing::trace;
 
 pub struct Server {
+    #[allow(dead_code)]
     ctx: Context,
     pd: ProtectionDomain,
     cq: CompletionQueue,

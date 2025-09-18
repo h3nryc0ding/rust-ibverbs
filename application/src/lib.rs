@@ -2,7 +2,6 @@ use bincode::config::standard;
 
 pub mod client;
 pub mod server;
-pub mod transfer;
 
 pub static KB: usize = 1024;
 pub static MB: usize = 1024 * KB;

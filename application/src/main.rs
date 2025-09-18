@@ -1,7 +1,6 @@
 use application::MB;
-use application::client::Client;
+use application::client::{BaseClient, Client, CopyClient, SimpleClient};
 use application::server::Server;
-use application::transfer::{CopyStrategy, TransferStrategy};
 use ibverbs::Context;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::{io, time};
@@ -18,6 +17,15 @@ struct Args {
 
     #[arg(long, default_value_t = Level::TRACE)]
     log: Level,
+
+    #[arg(long, value_enum, default_value_t = Mode::Simple)]
+    mode: Mode,
+}
+
+#[derive(clap::ValueEnum, Clone, Debug)]
+enum Mode {
+    Simple,
+    Copy,
 }
 
 fn main() -> io::Result<()> {
@@ -40,7 +48,10 @@ fn run(args: Args) -> io::Result<()> {
 
     match args.server {
         None => run_server(ctx, format!("0.0.0.0:{}", args.port)),
-        Some(addr) => run_client(ctx, format!("{}:{}", addr, args.port)),
+        Some(addr) => match args.mode {
+            Mode::Simple => run_client::<SimpleClient>(ctx, format!("{}:{}", addr, args.port)),
+            Mode::Copy => run_client::<CopyClient>(ctx, format!("{}:{}", addr, args.port)),
+        },
     }
 }
 
@@ -51,8 +62,9 @@ fn run_server(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<()> {
     server.serve()
 }
 
-fn run_client(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<()> {
-    let mut client = Client::new(ctx, addr)?;
+fn run_client<C: Client>(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<()> {
+    let base = BaseClient::new(ctx, addr)?;
+    let mut client = C::new(base)?;
     info!("Client started. Sending requests...");
 
     let start = time::Instant::now();
@@ -62,7 +74,7 @@ fn run_client(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<()> {
         let _enter = span.enter();
 
         info!("Sending");
-        let res = CopyStrategy::request(&mut client, size * MB)?;
+        let res = client.request(size * MB)?;
         info!("Received");
         received += res.len();
     }

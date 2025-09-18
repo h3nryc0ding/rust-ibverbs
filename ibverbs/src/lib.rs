@@ -1721,6 +1721,30 @@ impl RemoteMemorySlice {
     pub fn rkey(&self) -> u32 {
         self.rkey
     }
+    
+    pub fn slice(self, bounds: impl RangeBounds<usize>) -> Self {
+        let start = match bounds.start_bound() {
+            Bound::Included(&n) => n,
+            Bound::Excluded(&n) => n + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match bounds.end_bound() {
+            Bound::Included(&n) => n + 1,
+            Bound::Excluded(&n) => n,
+            Bound::Unbounded => self.len(),
+        };
+        assert!(start <= end);
+        let start_addr = self.addr + start as u64;
+        let end_addr = self.addr + end as u64;
+        let length = (end_addr - start_addr)
+            .try_into()
+            .expect("memory region slice length exceeds u32::MAX");
+        Self {
+            addr: start_addr,
+            length,
+            rkey: self.rkey,
+        }
+    }
 }
 
 struct ProtectionDomainInner {

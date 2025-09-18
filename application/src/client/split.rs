@@ -1,20 +1,23 @@
-use crate::client::Client;
-use crate::transfer::{SplitStrategy, TransferStrategy};
 use crate::OPTIMAL_MR_SIZE;
+use crate::client::{BaseClient, Client};
 use ibverbs::{BorrowedMemoryRegion, MemoryRegion, ibv_wc};
 use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use tracing::trace;
 
-impl TransferStrategy for SplitStrategy {
-    fn request(client: &mut Client, size: usize) -> io::Result<Box<[u8]>> {
-        let mut result: Vec<u8> = Vec::with_capacity(size);
-        unsafe { result.set_len(size) };
+pub struct SplitClient(BaseClient);
+
+impl Client for SplitClient {
+    fn new(base: BaseClient) -> io::Result<Self>{
+        Ok(Self(base))
+    }
+
+    fn request(&mut self, size: usize) -> io::Result<Box<[u8]>> {
+        let mut result = vec![0u8; size].into_boxed_slice();
         let result_ptr = result.as_mut_ptr();
 
         let chunks = (size + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
-        let mut outstanding_mrs = HashMap::new();
         let mut reg_queue = VecDeque::new();
         let mut post_queue = VecDeque::new();
 
@@ -30,9 +33,12 @@ impl TransferStrategy for SplitStrategy {
             });
         }
 
+        let mut outstanding_mrs = HashMap::new();
+        let mut completions = [ibv_wc::default(); 16];
+
         while !reg_queue.is_empty() || !post_queue.is_empty() || !outstanding_mrs.is_empty() {
             if let Some(job) = reg_queue.pop_front() {
-                match unsafe { client.pd.register_unchecked::<u8>(job.ptr, job.len) } {
+                match unsafe { self.0.pd.register_unchecked::<u8>(job.ptr, job.len) } {
                     Ok(mr) => {
                         trace!(
                             "registered mr id={} ptr={:?} len={}",
@@ -50,7 +56,7 @@ impl TransferStrategy for SplitStrategy {
 
             if let Some(job) = post_queue.pop_front() {
                 let local = job.mr.slice_local(..);
-                match unsafe { client.qp.post_read(&[local], client.remote, job.id) } {
+                match unsafe { self.0.qp.post_read(&[local], self.0.remote, job.id) } {
                     Ok(_) => {
                         trace!("posted read id={} len={}", job.id, local.len());
                         outstanding_mrs.insert(job.id, job.mr);
@@ -63,8 +69,7 @@ impl TransferStrategy for SplitStrategy {
                 }
             }
 
-            let mut completions = [ibv_wc::default(); 16];
-            for completion in client.cq.poll(&mut completions)? {
+            for completion in self.0.cq.poll(&mut completions)? {
                 if let Some((e, _)) = completion.error() {
                     panic!("wc error: {:?}", e)
                 }
@@ -80,7 +85,7 @@ impl TransferStrategy for SplitStrategy {
             }
         }
 
-        Ok(result.into_boxed_slice())
+        Ok(result)
     }
 }
 
