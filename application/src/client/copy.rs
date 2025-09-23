@@ -1,5 +1,5 @@
 use crate::OPTIMAL_MR_SIZE;
-use crate::client::{Client, BaseClient};
+use crate::client::{Client, BaseSingleQPClient};
 use ibverbs::{MemoryRegion, OwnedMemoryRegion, ibv_wc, Context};
 use std::collections::{HashMap, VecDeque};
 use std::io;
@@ -9,7 +9,7 @@ use tracing::{debug, trace};
 const RX_DEPTH: usize = 4;
 
 pub struct CopyClient {
-    base: BaseClient,
+    base: BaseSingleQPClient,
     mrs: VecDeque<OwnedMemoryRegion>,
 }
 
@@ -89,7 +89,7 @@ impl CopyClient {
 
 impl Client for CopyClient {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseClient::new(ctx, addr)?;
+        let base = BaseSingleQPClient::new(ctx, addr)?;
         let mut mrs = VecDeque::with_capacity(RX_DEPTH);
         while mrs.len() < RX_DEPTH {
             match base.pd.allocate::<u8>(OPTIMAL_MR_SIZE) {

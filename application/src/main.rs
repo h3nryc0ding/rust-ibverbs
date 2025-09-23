@@ -1,9 +1,8 @@
 use application::client::{
-    Client, CopyClient, IdealClient, IdealThreadedAtomicClient, IdealThreadedChannelClient,
-    NaiveClient, SplitClient,
+    Client, CopyClient, IdealClient, IdealThreadedClient, NaiveClient, SplitClient,
 };
 use application::server::Server;
-use application::{MB, OPTIMAL_MR_SIZE, SERVER_DATA_SIZE};
+use application::{MB, OPTIMAL_MR_SIZE};
 use ibverbs::Context;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::{io, time};
@@ -29,8 +28,7 @@ struct Args {
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum Mode {
     Ideal,
-    IdealThreadedAtomic,
-    IdealThreadedChannel,
+    IdealThreaded,
     Copy,
     Naive,
     Split,
@@ -60,11 +58,8 @@ fn run(args: Args) -> io::Result<()> {
             Mode::Naive => run_client::<NaiveClient>(ctx, format!("{}:{}", addr, args.port)),
             Mode::Copy => run_client::<CopyClient>(ctx, format!("{}:{}", addr, args.port)),
             Mode::Ideal => run_client::<IdealClient>(ctx, format!("{}:{}", addr, args.port)),
-            Mode::IdealThreadedAtomic => {
-                run_client::<IdealThreadedAtomicClient>(ctx, format!("{}:{}", addr, args.port))
-            }
-            Mode::IdealThreadedChannel => {
-                run_client::<IdealThreadedChannelClient>(ctx, format!("{}:{}", addr, args.port))
+            Mode::IdealThreaded => {
+                run_client::<IdealThreadedClient>(ctx, format!("{}:{}", addr, args.port))
             }
             Mode::Split => run_client::<SplitClient>(ctx, format!("{}:{}", addr, args.port)),
         },

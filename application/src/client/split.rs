@@ -1,5 +1,5 @@
 use crate::OPTIMAL_MR_SIZE;
-use crate::client::{Client, BaseClient};
+use crate::client::{Client, BaseSingleQPClient};
 use ibverbs::{BorrowedMemoryRegion, Context, MemoryRegion, ibv_wc};
 use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
@@ -7,11 +7,11 @@ use std::io;
 use std::net::ToSocketAddrs;
 use tracing::trace;
 
-pub struct SplitClient(BaseClient);
+pub struct SplitClient(BaseSingleQPClient);
 
 impl Client for SplitClient {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseClient::new(ctx, addr)?;
+        let base = BaseSingleQPClient::new(ctx, addr)?;
         Ok(Self(base))
     }
 

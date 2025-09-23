@@ -1,13 +1,13 @@
-use crate::client::{Client, BaseClient};
+use crate::client::{BaseSingleQPClient, Client};
 use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::io;
 use std::net::ToSocketAddrs;
 
-pub struct NaiveClient(BaseClient);
+pub struct NaiveClient(BaseSingleQPClient);
 
 impl Client for NaiveClient {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseClient::new(ctx, addr)?;
+        let base = BaseSingleQPClient::new(ctx, addr)?;
         Ok(Self(base))
     }
 
