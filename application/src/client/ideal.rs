@@ -1,19 +1,19 @@
 use crate::OPTIMAL_MR_SIZE;
 use crate::client::{Client, BaseClient};
-use ibverbs::{MemoryRegion, OwnedMemoryRegion, ibv_wc, Context};
+use ibverbs::{Context, MemoryRegion, OwnedMemoryRegion, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::net::ToSocketAddrs;
 use tracing::{debug, trace};
 
-const RX_DEPTH: usize = 4;
+const RX_DEPTH: usize = 8;
 
-pub struct CopyClient {
+pub struct IdealClient {
     base: BaseClient,
     mrs: VecDeque<OwnedMemoryRegion>,
 }
 
-impl CopyClient {
+impl IdealClient {
     fn post_read(
         &mut self,
         next_chunk: &mut usize,
@@ -26,12 +26,7 @@ impl CopyClient {
 
         if let Some(mr) = self.mrs.pop_front() {
             let local = mr.slice_local(..);
-            let offset = *next_chunk * OPTIMAL_MR_SIZE;
-            let end = offset + OPTIMAL_MR_SIZE;
-            let remote = self
-                .base
-                .remote
-                .slice(offset..end.min(self.base.remote.len()));
+            let remote = self.base.remote.slice(0..OPTIMAL_MR_SIZE);
 
             debug!(
                 "reading from remote addr={:?} len={} into addr={:?} len={}",
@@ -62,7 +57,6 @@ impl CopyClient {
         &mut self,
         completion: &ibv_wc,
         outstanding: &mut HashMap<u64, OwnedMemoryRegion>,
-        result: &mut [u8],
     ) -> io::Result<()> {
         if let Some((e, _)) = completion.error() {
             return Err(io::Error::new(
@@ -76,18 +70,13 @@ impl CopyClient {
             io::Error::new(io::ErrorKind::Other, format!("unknown wr_id: {}", id))
         })?;
 
-        let src = mr.as_slice();
-        let offset = id as usize * OPTIMAL_MR_SIZE;
-        let end = (offset + src.len()).min(result.len());
-        result[offset..end].copy_from_slice(&src[..end - offset]);
-
         self.mrs.push_back(mr);
         trace!("completed id={}", id);
         Ok(())
     }
 }
 
-impl Client for CopyClient {
+impl Client for IdealClient {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
         let base = BaseClient::new(ctx, addr)?;
         let mut mrs = VecDeque::with_capacity(RX_DEPTH);
@@ -110,7 +99,7 @@ impl Client for CopyClient {
     }
 
     fn request(&mut self, size: usize) -> io::Result<Box<[u8]>> {
-        let mut result = vec![0u8; size].into_boxed_slice();
+        let result = vec![0u8; size].into_boxed_slice();
         let total_chunks = (size + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
         let mut next_chunk = 0usize;
 
@@ -123,7 +112,7 @@ impl Client for CopyClient {
             }
 
             for completion in self.base.cq.poll(&mut completions)? {
-                self.handle_completion(completion, &mut outstanding, &mut result)?;
+                self.handle_completion(completion, &mut outstanding)?;
             }
         }
         Ok(result)

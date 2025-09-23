@@ -1,7 +1,7 @@
 use criterion::BatchSize::PerIteration;
 use criterion::{criterion_group, criterion_main, Criterion};
 use ffi::{ibv_qp_type, ibv_wc};
-use ibverbs::CompletionQueue;
+use ibverbs::{CompletionQueue, MemoryRegion};
 use std::hint;
 use std::time::Duration;
 
@@ -30,7 +30,7 @@ pub fn benchmark(c: &mut Criterion) {
         pqp.handshake(local).unwrap()
     };
     let mr = pd.allocate::<u8>(4 * GB).unwrap();
-    let remote = mr.remote();
+    let remote = mr.slice_remote(..);
 
     let mut group = c.benchmark_group("QueuePair");
     for size in [
@@ -63,7 +63,7 @@ pub fn benchmark(c: &mut Criterion) {
                     let mut completions = [ibv_wc::default(); BATCH_SIZE];
 
                     for (idx, mr) in mrs.iter().enumerate() {
-                        let local_slice = mr.slice(..);
+                        let local_slice = mr.slice_local(..);
                         let remote_slice = remote.slice(idx * size..(idx + 1) * size);
                         while let Err(_) = qp.post_read(&[local_slice], remote_slice, idx as u64) {
                             done += poll(&cq, &mut completions[done..]);

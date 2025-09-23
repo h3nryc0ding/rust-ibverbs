@@ -1,11 +1,13 @@
-use crate::client::{BaseClient, Client};
-use ibverbs::{MemoryRegion, ibv_wc};
+use crate::client::{Client, BaseClient};
+use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::io;
+use std::net::ToSocketAddrs;
 
-pub struct SimpleClient(BaseClient);
+pub struct NaiveClient(BaseClient);
 
-impl Client for SimpleClient {
-    fn new(base: BaseClient) -> io::Result<Self> {
+impl Client for NaiveClient {
+    fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
+        let base = BaseClient::new(ctx, addr)?;
         Ok(Self(base))
     }
 

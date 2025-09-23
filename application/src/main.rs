@@ -1,12 +1,16 @@
-use application::MB;
-use application::client::{BaseClient, Client, CopyClient, SimpleClient};
+use application::client::{
+    Client, CopyClient, IdealClient, IdealThreadedAtomicClient, IdealThreadedChannelClient,
+    NaiveClient, SplitClient,
+};
 use application::server::Server;
+use application::{MB, OPTIMAL_MR_SIZE, SERVER_DATA_SIZE};
 use ibverbs::Context;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::{io, time};
 use tracing::{Level, info, info_span};
 
-const REQUEST_COUNT: usize = 256;
+const MIN_REQUEST_SIZE: usize = OPTIMAL_MR_SIZE;
+const MAX_REQUEST_SIZE: usize = 512 * MB;
 
 #[derive(clap::Parser, Debug)]
 #[command(version, about = "Start an RDMA server or connect as a client.")]
@@ -18,14 +22,18 @@ struct Args {
     #[arg(long, default_value_t = Level::TRACE)]
     log: Level,
 
-    #[arg(long, value_enum, default_value_t = Mode::Simple)]
+    #[arg(long, value_enum)]
     mode: Mode,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum Mode {
-    Simple,
+    Ideal,
+    IdealThreadedAtomic,
+    IdealThreadedChannel,
     Copy,
+    Naive,
+    Split,
 }
 
 fn main() -> io::Result<()> {
@@ -49,8 +57,16 @@ fn run(args: Args) -> io::Result<()> {
     match args.server {
         None => run_server(ctx, format!("0.0.0.0:{}", args.port)),
         Some(addr) => match args.mode {
-            Mode::Simple => run_client::<SimpleClient>(ctx, format!("{}:{}", addr, args.port)),
+            Mode::Naive => run_client::<NaiveClient>(ctx, format!("{}:{}", addr, args.port)),
             Mode::Copy => run_client::<CopyClient>(ctx, format!("{}:{}", addr, args.port)),
+            Mode::Ideal => run_client::<IdealClient>(ctx, format!("{}:{}", addr, args.port)),
+            Mode::IdealThreadedAtomic => {
+                run_client::<IdealThreadedAtomicClient>(ctx, format!("{}:{}", addr, args.port))
+            }
+            Mode::IdealThreadedChannel => {
+                run_client::<IdealThreadedChannelClient>(ctx, format!("{}:{}", addr, args.port))
+            }
+            Mode::Split => run_client::<SplitClient>(ctx, format!("{}:{}", addr, args.port)),
         },
     }
 }
@@ -63,18 +79,17 @@ fn run_server(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<()> {
 }
 
 fn run_client<C: Client>(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<()> {
-    let base = BaseClient::new(ctx, addr)?;
-    let mut client = C::new(base)?;
+    let mut client = C::new(ctx, addr)?;
     info!("Client started. Sending requests...");
 
     let start = time::Instant::now();
     let mut received = 0;
-    for size in 1..REQUEST_COUNT {
+    for size in (MIN_REQUEST_SIZE..=MAX_REQUEST_SIZE).step_by(OPTIMAL_MR_SIZE) {
         let span = info_span!("request", request_id = size);
         let _enter = span.enter();
 
         info!("Sending");
-        let res = client.request(size * MB)?;
+        let res = client.request(size)?;
         info!("Received");
         received += res.len();
     }

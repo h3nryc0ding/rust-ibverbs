@@ -1,15 +1,17 @@
 use crate::OPTIMAL_MR_SIZE;
-use crate::client::{BaseClient, Client};
-use ibverbs::{BorrowedMemoryRegion, MemoryRegion, ibv_wc};
+use crate::client::{Client, BaseClient};
+use ibverbs::{BorrowedMemoryRegion, Context, MemoryRegion, ibv_wc};
 use std::cmp::min;
 use std::collections::{HashMap, VecDeque};
 use std::io;
+use std::net::ToSocketAddrs;
 use tracing::trace;
 
 pub struct SplitClient(BaseClient);
 
 impl Client for SplitClient {
-    fn new(base: BaseClient) -> io::Result<Self>{
+    fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
+        let base = BaseClient::new(ctx, addr)?;
         Ok(Self(base))
     }
 
@@ -56,7 +58,8 @@ impl Client for SplitClient {
 
             if let Some(job) = post_queue.pop_front() {
                 let local = job.mr.slice_local(..);
-                match unsafe { self.0.qp.post_read(&[local], self.0.remote, job.id) } {
+                let remote = self.0.remote.slice(..OPTIMAL_MR_SIZE);
+                match unsafe { self.0.qp.post_read(&[local], remote, job.id) } {
                     Ok(_) => {
                         trace!("posted read id={} len={}", job.id, local.len());
                         outstanding_mrs.insert(job.id, job.mr);
