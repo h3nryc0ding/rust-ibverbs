@@ -39,26 +39,27 @@ impl Client for IdealClient {
         let mut completions = vec![ibv_wc::default(); RX_DEPTH];
 
         let mut unused = (0..RX_DEPTH).collect::<VecDeque<usize>>();
-        let mut completed = 0;
-        let mut pending = 0;
+        let mut posted = 0;
+        let mut received = 0;
 
-        while pending > 0 || completed < chunks {
-            while completed < chunks {
+        while received < chunks {
+            while posted < chunks {
                 if let Some(mr_idx) = unused.pop_front() {
                     let mr = &self.mrs[mr_idx];
                     let local = mr.slice_local(..);
                     let remote_slice = self
                         .base
                         .remote
-                        .slice(completed * OPTIMAL_MR_SIZE..(completed + 1) * OPTIMAL_MR_SIZE);
+                        .slice(posted * OPTIMAL_MR_SIZE..(posted + 1) * OPTIMAL_MR_SIZE);
 
+                    let mut success = false;
                     for i in 0..self.base.qps.len() {
                         match unsafe {
                             self.base.qps[i].post_read(&[local], remote_slice, mr_idx as u64)
                         } {
                             Ok(_) => {
-                                completed += 1;
-                                pending += 1;
+                                posted += 1;
+                                success = true;
                                 break;
                             }
                             Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {
@@ -66,6 +67,10 @@ impl Client for IdealClient {
                             }
                             Err(e) => return Err(e),
                         }
+                    }
+                    if !success {
+                        unused.push_front(mr_idx);
+                        break;
                     }
                 } else {
                     break;
@@ -75,7 +80,7 @@ impl Client for IdealClient {
             for completion in self.base.cq.poll(&mut completions)? {
                 let mr_idx = completion.wr_id() as usize;
                 unused.push_back(mr_idx);
-                pending -= 1;
+                received += 1;
             }
         }
         Ok(result)

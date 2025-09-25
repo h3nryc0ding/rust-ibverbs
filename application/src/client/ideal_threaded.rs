@@ -26,10 +26,9 @@ impl Client for IdealThreadedClient {
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let mut mrs = Vec::with_capacity(RX_DEPTH);
-        let pd = base.pd.lock().unwrap();
         for _ in 0..RX_DEPTH {
             loop {
-                match pd.allocate::<u8>(OPTIMAL_MR_SIZE) {
+                match base.pd.allocate::<u8>(OPTIMAL_MR_SIZE) {
                     Ok(mr) => {
                         mrs.push(mr);
                         break;
@@ -71,11 +70,7 @@ impl Client for IdealThreadedClient {
 
                             for i in 0..usize::MAX {
                                 match unsafe {
-                                    qps[i % qps.len()].lock().unwrap().post_read(
-                                        &[local],
-                                        remote,
-                                        mr_idx as u64,
-                                    )
+                                    qps[i % qps.len()].post_read(&[local], remote, mr_idx as u64)
                                 } {
                                     Ok(_) => break,
                                     Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {
@@ -104,7 +99,6 @@ impl Client for IdealThreadedClient {
             let shutdown = shutdown.clone();
 
             thread::spawn(move || {
-                let cq = cq.lock().unwrap();
                 let mut completions = vec![ibv_wc::default(); RX_DEPTH];
 
                 while !shutdown.load(Ordering::Relaxed) {

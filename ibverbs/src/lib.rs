@@ -67,13 +67,13 @@
 use std::convert::TryInto;
 use std::ffi::CStr;
 use std::fmt::Debug;
+use std::io;
 use std::mem::ManuallyDrop;
 use std::ops::{Bound, Deref, DerefMut, RangeBounds};
 use std::os::fd::BorrowedFd;
 use std::os::raw::c_void;
 use std::sync::Arc;
 use std::time::Duration;
-use std::io;
 use std::{ptr, slice};
 
 const PORT_NUM: u8 = 1;
@@ -1721,7 +1721,7 @@ impl RemoteMemorySlice {
     pub fn rkey(&self) -> u32 {
         self.rkey
     }
-    
+
     pub fn slice(self, bounds: impl RangeBounds<usize>) -> Self {
         let start = match bounds.start_bound() {
             Bound::Included(&n) => n,
@@ -2050,7 +2050,7 @@ impl QueuePair {
     /// Remote RDMA read.
     /// RDMA read does not support immediate data.
     pub unsafe fn post_read(
-        &mut self,
+        &self,
         local: &[LocalMemorySlice],
         remote: RemoteMemorySlice,
         wr_id: u64,
@@ -2061,7 +2061,7 @@ impl QueuePair {
 
     // internal function to do one sided communication
     unsafe fn _post_one_sided(
-        &mut self,
+        &self,
         local: &[LocalMemorySlice],
         remote: RemoteMemorySlice,
         wr_id: u64,

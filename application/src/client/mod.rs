@@ -1,8 +1,10 @@
 mod copy;
+mod copy_threaded;
 mod ideal;
 mod ideal_threaded;
 mod naive;
-mod split;
+mod pipeline;
+mod pipeline_threaded;
 
 use crate::BINCODE_CONFIG;
 use bincode::serde::{decode_from_std_read, encode_into_std_write};
@@ -10,14 +12,16 @@ use ibverbs::ibv_qp_type::IBV_QPT_RC;
 use ibverbs::{CompletionQueue, Context, ProtectionDomain, QueuePair, RemoteMemorySlice};
 use std::io;
 use std::net::{TcpStream, ToSocketAddrs};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tracing::trace;
 
 pub use crate::client::copy::CopyClient;
+pub use crate::client::copy_threaded::CopyThreadedClient;
 pub use crate::client::ideal::IdealClient;
 pub use crate::client::ideal_threaded::IdealThreadedClient;
 pub use crate::client::naive::NaiveClient;
-pub use crate::client::split::SplitClient;
+pub use crate::client::pipeline::PipelineClient;
+pub use crate::client::pipeline_threaded::PipelineThreadedClient;
 
 pub struct BaseSingleQPClient {
     #[allow(dead_code)]
@@ -43,9 +47,9 @@ pub struct BaseMultiQPClient {
 pub struct BaseThreadedSingleQPClient {
     #[allow(dead_code)]
     ctx: Arc<Context>,
-    pub(crate) pd: Arc<Mutex<ProtectionDomain>>,
-    pub(crate) cq: Arc<Mutex<CompletionQueue>>,
-    pub(crate) qp: Arc<Mutex<QueuePair>>,
+    pub(crate) pd: Arc<ProtectionDomain>,
+    pub(crate) cq: Arc<CompletionQueue>,
+    pub(crate) qp: Arc<QueuePair>,
 
     pub(crate) remote: RemoteMemorySlice,
 }
@@ -54,9 +58,9 @@ pub struct BaseThreadedSingleQPClient {
 pub struct BaseThreadedMultiQPClient {
     #[allow(dead_code)]
     ctx: Arc<Context>,
-    pub(crate) pd: Arc<Mutex<ProtectionDomain>>,
-    pub(crate) cq: Arc<Mutex<CompletionQueue>>,
-    pub(crate) qps: Vec<Arc<Mutex<QueuePair>>>,
+    pub(crate) pd: Arc<ProtectionDomain>,
+    pub(crate) cq: Arc<CompletionQueue>,
+    pub(crate) qps: Vec<Arc<QueuePair>>,
 
     pub(crate) remote: RemoteMemorySlice,
 }
@@ -135,9 +139,9 @@ impl BaseThreadedSingleQPClient {
         let client = BaseSingleQPClient::new(ctx, addr)?;
         Ok(Self {
             ctx: Arc::new(client.ctx),
-            pd: Arc::new(Mutex::new(client.pd)),
-            cq: Arc::new(Mutex::new(client.cq)),
-            qp: Arc::new(Mutex::new(client.qp)),
+            pd: Arc::new(client.pd),
+            cq: Arc::new(client.cq),
+            qp: Arc::new(client.qp),
             remote: client.remote,
         })
     }
@@ -148,13 +152,9 @@ impl BaseThreadedMultiQPClient {
         let client = BaseMultiQPClient::new::<QP>(ctx, addr)?;
         Ok(Self {
             ctx: Arc::new(client.ctx),
-            pd: Arc::new(Mutex::new(client.pd)),
-            cq: Arc::new(Mutex::new(client.cq)),
-            qps: client
-                .qps
-                .into_iter()
-                .map(|qp| Arc::new(Mutex::new(qp)))
-                .collect(),
+            pd: Arc::new(client.pd),
+            cq: Arc::new(client.cq),
+            qps: client.qps.into_iter().map(|qp| Arc::new(qp)).collect(),
             remote: client.remote,
         })
     }
@@ -164,5 +164,5 @@ pub trait Client {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self>
     where
         Self: Sized;
-    fn request(&mut self, size: usize) -> io::Result<Box<[u8]>>;
+    fn request(&mut self, dst: *mut u8, size: usize) -> io::Result<()>;
 }

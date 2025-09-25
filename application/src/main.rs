@@ -1,12 +1,19 @@
 use application::client::{
-    Client, CopyClient, IdealClient, IdealThreadedClient, NaiveClient, SplitClient,
+    Client, CopyClient, CopyThreadedClient, IdealClient, IdealThreadedClient, NaiveClient,
+    PipelineClient, PipelineThreadedClient,
 };
 use application::server::Server;
-use application::{MB, OPTIMAL_MR_SIZE};
+use application::{GB, MB, OPTIMAL_MR_SIZE};
 use ibverbs::Context;
+// use mimalloc::MiMalloc;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::{io, time};
+// use tikv_jemallocator::Jemalloc;
 use tracing::{Level, info, info_span};
+
+// #[global_allocator]
+// static GLOBAL: MiMalloc = MiMalloc;
+// static GLOBAL: Jemalloc = Jemalloc;
 
 const MIN_REQUEST_SIZE: usize = OPTIMAL_MR_SIZE;
 const MAX_REQUEST_SIZE: usize = 512 * MB;
@@ -30,8 +37,10 @@ enum Mode {
     Ideal,
     IdealThreaded,
     Copy,
+    CopyThreaded,
     Naive,
-    Split,
+    Pipeline,
+    PipelineThreaded,
 }
 
 fn main() -> io::Result<()> {
@@ -39,6 +48,7 @@ fn main() -> io::Result<()> {
 
     tracing_subscriber::fmt()
         .with_max_level(args.log)
+        .with_thread_ids(true)
         .compact()
         .init();
 
@@ -57,11 +67,17 @@ fn run(args: Args) -> io::Result<()> {
         Some(addr) => match args.mode {
             Mode::Naive => run_client::<NaiveClient>(ctx, format!("{}:{}", addr, args.port)),
             Mode::Copy => run_client::<CopyClient>(ctx, format!("{}:{}", addr, args.port)),
+            Mode::CopyThreaded => {
+                run_client::<CopyThreadedClient>(ctx, format!("{}:{}", addr, args.port))
+            }
             Mode::Ideal => run_client::<IdealClient>(ctx, format!("{}:{}", addr, args.port)),
             Mode::IdealThreaded => {
                 run_client::<IdealThreadedClient>(ctx, format!("{}:{}", addr, args.port))
             }
-            Mode::Split => run_client::<SplitClient>(ctx, format!("{}:{}", addr, args.port)),
+            Mode::Pipeline => run_client::<PipelineClient>(ctx, format!("{}:{}", addr, args.port)),
+            Mode::PipelineThreaded => {
+                run_client::<PipelineThreadedClient>(ctx, format!("{}:{}", addr, args.port))
+            }
         },
     }
 }
@@ -79,6 +95,7 @@ fn run_client<C: Client>(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<(
 
     let start = time::Instant::now();
     let mut received = 0;
+    let result = vec![0u8; MAX_REQUEST_SIZE];
     for size in (MIN_REQUEST_SIZE..=MAX_REQUEST_SIZE).step_by(OPTIMAL_MR_SIZE) {
         let span = info_span!("request", request_id = size);
         let _enter = span.enter();

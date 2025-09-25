@@ -1,131 +1,100 @@
 use crate::OPTIMAL_MR_SIZE;
-use crate::client::{Client, BaseSingleQPClient};
-use ibverbs::{MemoryRegion, OwnedMemoryRegion, ibv_wc, Context};
-use std::collections::{HashMap, VecDeque};
-use std::io;
+use crate::client::{BaseMultiQPClient, Client};
+use ibverbs::{Context, MemoryRegion, OwnedMemoryRegion, ibv_wc};
+use std::collections::VecDeque;
 use std::net::ToSocketAddrs;
-use tracing::{debug, trace};
+use std::{hint, io};
 
-const RX_DEPTH: usize = 4;
+const RX_DEPTH: usize = 128;
 
 pub struct CopyClient {
-    base: BaseSingleQPClient,
-    mrs: VecDeque<OwnedMemoryRegion>,
-}
-
-impl CopyClient {
-    fn post_read(
-        &mut self,
-        next_chunk: &mut usize,
-        total_chunks: usize,
-        outstanding: &mut HashMap<u64, OwnedMemoryRegion>,
-    ) -> io::Result<()> {
-        if *next_chunk >= total_chunks {
-            return Ok(());
-        }
-
-        if let Some(mr) = self.mrs.pop_front() {
-            let local = mr.slice_local(..);
-            let offset = *next_chunk * OPTIMAL_MR_SIZE;
-            let end = offset + OPTIMAL_MR_SIZE;
-            let remote = self
-                .base
-                .remote
-                .slice(offset..end.min(self.base.remote.len()));
-
-            debug!(
-                "reading from remote addr={:?} len={} into addr={:?} len={}",
-                remote.addr(),
-                remote.len(),
-                local.addr(),
-                local.len()
-            );
-
-            let id = *next_chunk as u64;
-            match unsafe { self.base.qp.post_read(&[local], remote, id) } {
-                Ok(_) => {
-                    trace!("posted read id={} len={}", id, local.len());
-                    outstanding.insert(id, mr);
-                    *next_chunk += 1;
-                }
-                Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {
-                    trace!("post_read OOM, retry later");
-                    self.mrs.push_back(mr);
-                }
-                Err(e) => return Err(e),
-            }
-        }
-        Ok(())
-    }
-
-    fn handle_completion(
-        &mut self,
-        completion: &ibv_wc,
-        outstanding: &mut HashMap<u64, OwnedMemoryRegion>,
-        result: &mut [u8],
-    ) -> io::Result<()> {
-        if let Some((e, _)) = completion.error() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                format!("wc error: {:?}", e),
-            ));
-        }
-
-        let id = completion.wr_id();
-        let mr = outstanding.remove(&id).ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, format!("unknown wr_id: {}", id))
-        })?;
-
-        let src = mr.as_slice();
-        let offset = id as usize * OPTIMAL_MR_SIZE;
-        let end = (offset + src.len()).min(result.len());
-        result[offset..end].copy_from_slice(&src[..end - offset]);
-
-        self.mrs.push_back(mr);
-        trace!("completed id={}", id);
-        Ok(())
-    }
+    base: BaseMultiQPClient,
+    mrs: Vec<OwnedMemoryRegion>,
 }
 
 impl Client for CopyClient {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseSingleQPClient::new(ctx, addr)?;
-        let mut mrs = VecDeque::with_capacity(RX_DEPTH);
-        while mrs.len() < RX_DEPTH {
-            match base.pd.allocate::<u8>(OPTIMAL_MR_SIZE) {
-                Ok(mr) => {
-                    trace!("preallocated mr addr={:?} len={}", mr.addr(), mr.len());
-                    mrs.push_back(mr);
-                }
-                Err(e) => {
-                    if e.kind() == io::ErrorKind::OutOfMemory {
-                        trace!("preallocate mr OOM, retrying");
-                    } else {
-                        return Err(e);
+        let base = BaseMultiQPClient::new::<3>(ctx, addr)?;
+
+        let mut mrs = Vec::with_capacity(RX_DEPTH);
+        for _ in 0..RX_DEPTH {
+            loop {
+                match base.pd.allocate::<u8>(OPTIMAL_MR_SIZE) {
+                    Ok(mr) => {
+                        mrs.push(mr);
+                        break;
                     }
+                    Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
+                    Err(e) => return Err(e),
                 }
             }
         }
+
         Ok(Self { base, mrs })
     }
 
-    fn request(&mut self, size: usize) -> io::Result<Box<[u8]>> {
-        let mut result = vec![0u8; size].into_boxed_slice();
-        let total_chunks = (size + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
-        let mut next_chunk = 0usize;
+    fn request(&mut self, dst: *mut u8, size: usize) -> io::Result<()> {
+        let chunks = (size + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
+        let mut completions = vec![ibv_wc::default(); RX_DEPTH];
 
-        let mut outstanding = HashMap::new();
-        let mut completions = [ibv_wc::default(); RX_DEPTH];
+        let mut unused = (0..RX_DEPTH).collect::<VecDeque<usize>>();
+        let mut posted = 0;
+        let mut received = 0;
 
-        while next_chunk < total_chunks || !outstanding.is_empty() {
-            if next_chunk < total_chunks {
-                self.post_read(&mut next_chunk, total_chunks, &mut outstanding)?;
+        while received < chunks {
+            while posted < chunks {
+                if let Some(mr_idx) = unused.pop_front() {
+                    let mr = &self.mrs[mr_idx];
+                    let local = mr.slice_local(..);
+
+                    let remote_slice = self
+                        .base
+                        .remote
+                        .slice(posted * OPTIMAL_MR_SIZE..(posted + 1) * OPTIMAL_MR_SIZE);
+
+                    let chunk_idx = posted;
+                    let wr_id = (chunk_idx as u64) << 32 | (mr_idx as u64);
+
+                    let mut success = false;
+                    for qp in &mut self.base.qps {
+                        match unsafe { qp.post_read(&[local], remote_slice, wr_id) } {
+                            Ok(_) => {
+                                posted += 1;
+                                success = true;
+                                break;
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {
+                                hint::spin_loop();
+                            }
+                            Err(e) => return Err(e),
+                        }
+                    }
+                    if !success {
+                        unused.push_front(mr_idx);
+                        break;
+                    }
+                } else {
+                    break;
+                }
             }
 
             for completion in self.base.cq.poll(&mut completions)? {
-                self.handle_completion(completion, &mut outstanding, &mut result)?;
+                let wr_id = completion.wr_id();
+                let chunk_idx = (wr_id >> 32) as usize;
+                let mr_idx = (wr_id & 0xFFFFFFFF) as usize;
+
+                let mr = &self.mrs[mr_idx];
+                let start = chunk_idx * OPTIMAL_MR_SIZE;
+                let end = start + OPTIMAL_MR_SIZE;
+
+                let src_slice = mr.as_slice();
+                let dest_slice = &mut result[start..end];
+                dest_slice.copy_from_slice(src_slice);
+
+                unused.push_back(mr_idx);
+                received += 1;
             }
         }
-        Ok(result)
+        Ok()
     }
 }
