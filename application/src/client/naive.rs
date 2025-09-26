@@ -1,23 +1,19 @@
-use crate::client::{BaseSingleQPClient, Client};
+use crate::client::{BaseClient, Client};
 use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::io;
 use std::net::ToSocketAddrs;
 
-pub struct NaiveClient(BaseSingleQPClient);
+pub struct NaiveClient(BaseClient<1>);
 
 impl Client for NaiveClient {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseSingleQPClient::new(ctx, addr)?;
+        let base = BaseClient::new(ctx, addr)?;
         Ok(Self(base))
     }
 
-    fn request(&mut self, size: usize) -> io::Result<Box<[u8]>> {
-        let local = self.0.pd.allocate(size)?;
-        unsafe {
-            self.0
-                .qp
-                .post_read(&[local.slice_local(..)], self.0.remote, 0)?
-        };
+    fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
+        let local = self.0.pd.register(dst)?;
+        unsafe { self.0.qps[0].post_read(&[local.slice_local(..)], self.0.remote, 0)? };
 
         let mut completed = false;
         let mut completions = [ibv_wc::default(); 1];
@@ -30,6 +26,7 @@ impl Client for NaiveClient {
             }
         }
 
-        local.deregister()
+        local.deregister()?;
+        Ok(())
     }
 }

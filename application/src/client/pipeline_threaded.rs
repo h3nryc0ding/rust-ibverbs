@@ -1,8 +1,6 @@
 use crate::OPTIMAL_MR_SIZE;
-use crate::client::{BaseThreadedMultiQPClient, Client};
-use ibverbs::{
-    BorrowedMemoryRegion, Context, MemoryRegion, RemoteMemorySlice, ibv_wc,
-};
+use crate::client::{BaseClient, Client};
+use ibverbs::{BorrowedMemoryRegion, Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
 use std::sync::mpsc::{Receiver, Sender, TryRecvError};
@@ -14,7 +12,7 @@ const THREADS_REGISTRATION: usize = 2;
 const THREADS_DEREGISTRATION: usize = 1;
 
 pub struct PipelineThreadedClient {
-    base: BaseThreadedMultiQPClient,
+    base: BaseClient<3>,
 
     reg_tx: Sender<RegistrationRequest>,
     post_rx: Receiver<PostRequest>,
@@ -23,7 +21,7 @@ pub struct PipelineThreadedClient {
 
 impl Client for PipelineThreadedClient {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseThreadedMultiQPClient::new::<3>(ctx, addr)?;
+        let base = BaseClient::new(ctx, addr)?;
 
         let (reg_tx, reg_rx) = mpsc::channel();
         let (post_tx, post_rx) = mpsc::channel();
@@ -74,16 +72,15 @@ impl Client for PipelineThreadedClient {
         })
     }
 
-    fn request(&mut self, size: usize) -> io::Result<Box<[u8]>> {
-        let result = Arc::new(vec![0u8; size]);
-        let chunks = (size + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
+    fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
+        let chunks = (dst.len() + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
         let mut completions = vec![ibv_wc::default(); chunks];
 
         let mut posted = 0u64;
         let mut finished = 0;
         let mut outstanding = HashMap::new();
         for chunk in 0..chunks {
-            let src = result[chunk * OPTIMAL_MR_SIZE..].as_ptr();
+            let src = dst[chunk * OPTIMAL_MR_SIZE..].as_ptr();
             let remote = self
                 .base
                 .remote
@@ -149,8 +146,7 @@ impl Client for PipelineThreadedClient {
             }
         }
 
-        let result = Arc::try_unwrap(result).unwrap();
-        Ok(result.into_boxed_slice())
+        Ok(())
     }
 }
 

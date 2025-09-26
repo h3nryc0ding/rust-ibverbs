@@ -3,33 +3,27 @@ use application::client::{
     PipelineClient, PipelineThreadedClient,
 };
 use application::server::Server;
-use application::{GB, MB, OPTIMAL_MR_SIZE};
+use application::{GB, OPTIMAL_MR_SIZE};
 use ibverbs::Context;
-// use mimalloc::MiMalloc;
 use std::net::{IpAddr, ToSocketAddrs};
 use std::{io, time};
-// use tikv_jemallocator::Jemalloc;
 use tracing::{Level, info, info_span};
 
-// #[global_allocator]
-// static GLOBAL: MiMalloc = MiMalloc;
-// static GLOBAL: Jemalloc = Jemalloc;
-
 const MIN_REQUEST_SIZE: usize = OPTIMAL_MR_SIZE;
-const MAX_REQUEST_SIZE: usize = 512 * MB;
+const MAX_REQUEST_SIZE: usize = 1 * GB;
 
 #[derive(clap::Parser, Debug)]
 #[command(version, about = "Start an RDMA server or connect as a client.")]
 struct Args {
     server: Option<IpAddr>,
+    #[arg(long, value_enum, required_if_eq("server", "Some"))]
+    mode: Option<Mode>,
+
     #[arg(short, long, default_value_t = 18515)]
     port: u16,
 
     #[arg(long, default_value_t = Level::TRACE)]
     log: Level,
-
-    #[arg(long, value_enum)]
-    mode: Mode,
 }
 
 #[derive(clap::ValueEnum, Clone, Debug)]
@@ -64,7 +58,7 @@ fn run(args: Args) -> io::Result<()> {
 
     match args.server {
         None => run_server(ctx, format!("0.0.0.0:{}", args.port)),
-        Some(addr) => match args.mode {
+        Some(addr) => match args.mode.unwrap() {
             Mode::Naive => run_client::<NaiveClient>(ctx, format!("{}:{}", addr, args.port)),
             Mode::Copy => run_client::<CopyClient>(ctx, format!("{}:{}", addr, args.port)),
             Mode::CopyThreaded => {
@@ -95,20 +89,20 @@ fn run_client<C: Client>(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<(
 
     let start = time::Instant::now();
     let mut received = 0;
-    let result = vec![0u8; MAX_REQUEST_SIZE];
+    let mut result = vec![0u8; MAX_REQUEST_SIZE];
     for size in (MIN_REQUEST_SIZE..=MAX_REQUEST_SIZE).step_by(OPTIMAL_MR_SIZE) {
         let span = info_span!("request", request_id = size);
         let _enter = span.enter();
 
         info!("Sending");
-        let res = client.request(size)?;
+        let _ = client.request(&mut result[0..size])?;
         info!("Received");
-        received += res.len();
+        received += size;
     }
     let duration = start.elapsed();
     let received_gb = received as f64 / 2f64.powi(30);
 
-    info!(
+    println!(
         "Received {} GiB in {:?} ({} GiB/s)",
         received_gb,
         duration,

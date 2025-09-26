@@ -4,9 +4,7 @@ use hwlocality::cpu::binding::CpuBindingFlags;
 use hwlocality::cpu::cpuset::CpuSet;
 use hwlocality::memory::binding::{MemoryBindingFlags, MemoryBindingPolicy};
 use hwlocality::object::depth::Depth;
-use std::mem::MaybeUninit;
-use std::{io, process};
-use tracing::instrument;
+use std::io;
 
 pub mod client;
 pub mod server;
@@ -19,6 +17,8 @@ pub const BINCODE_CONFIG: Configuration = standard();
 
 pub const SERVER_DATA_SIZE: usize = 2 * GB;
 pub const OPTIMAL_MR_SIZE: usize = 4 * MB;
+
+pub const OPTIMAL_QP_COUNT: usize = 3;
 
 fn pin_thread_to_node<const NODE: usize>() -> io::Result<()> {
     let tid = hwlocality::current_thread_id();
@@ -36,7 +36,11 @@ fn pin_thread_to_node<const NODE: usize>() -> io::Result<()> {
         .unwrap();
 
     topology
-        .bind_memory(&cpuset, MemoryBindingPolicy::Bind, MemoryBindingFlags::THREAD)
+        .bind_memory(
+            &cpuset,
+            MemoryBindingPolicy::Bind,
+            MemoryBindingFlags::THREAD,
+        )
         .unwrap();
 
     Ok(())

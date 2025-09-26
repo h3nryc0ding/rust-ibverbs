@@ -1,5 +1,5 @@
-use crate::client::{BaseMultiQPClient, Client};
-use crate::{OPTIMAL_MR_SIZE, pin_thread_to_node};
+use crate::client::{BaseClient, Client};
+use crate::{OPTIMAL_MR_SIZE, OPTIMAL_QP_COUNT, pin_thread_to_node};
 use ibverbs::{Context, MemoryRegion, OwnedMemoryRegion, ibv_wc};
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
@@ -14,7 +14,7 @@ const COPY_THREADS: usize = 8;
 const NUMA_NODE: usize = 1;
 
 pub struct CopyThreadedClient {
-    base: BaseMultiQPClient,
+    base: BaseClient<OPTIMAL_QP_COUNT>,
     mrs: Arc<Mutex<Vec<OwnedMemoryRegion>>>,
 
     sender: mpsc::Sender<CopyRequest>,
@@ -23,7 +23,7 @@ pub struct CopyThreadedClient {
 
 impl Client for CopyThreadedClient {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseMultiQPClient::new::<3>(ctx, addr)?;
+        let base = BaseClient::new(ctx, addr)?;
 
         let mut mrs = Vec::with_capacity(RX_DEPTH);
         for _ in 0..RX_DEPTH {
@@ -85,9 +85,8 @@ impl Client for CopyThreadedClient {
         })
     }
 
-    fn request(&mut self, size: usize) -> io::Result<Box<[u8]>> {
-        let result = vec![0u8; size];
-        let chunks = (size + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
+    fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
+        let chunks = (dst.len() + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
         let mut completions = vec![ibv_wc::default(); RX_DEPTH];
         self.finished.store(0, Ordering::SeqCst);
 
@@ -138,8 +137,7 @@ impl Client for CopyThreadedClient {
                 let chunk_idx = wr_id as usize;
 
                 if let Some(mr) = outstanding.remove(&chunk_idx) {
-                    let dst =
-                        unsafe { result.as_ptr().add(chunk_idx * OPTIMAL_MR_SIZE) as *mut u8 };
+                    let dst = dst[chunk_idx * OPTIMAL_MR_SIZE..].as_ptr() as *mut u8;
                     let request = CopyRequest { mr, dst };
                     self.sender.send(request).unwrap();
                 }
@@ -150,7 +148,7 @@ impl Client for CopyThreadedClient {
             hint::spin_loop();
         }
 
-        Ok(result.into_boxed_slice())
+        Ok(())
     }
 }
 

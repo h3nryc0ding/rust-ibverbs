@@ -1,5 +1,5 @@
-use crate::OPTIMAL_MR_SIZE;
-use crate::client::{BaseThreadedMultiQPClient, Client};
+use crate::client::{BaseClient, Client};
+use crate::{OPTIMAL_MR_SIZE, OPTIMAL_QP_COUNT};
 use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::net::ToSocketAddrs;
 use std::sync::Arc;
@@ -22,7 +22,7 @@ pub struct IdealThreadedClient {
 
 impl Client for IdealThreadedClient {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseThreadedMultiQPClient::new::<3>(ctx, addr)?;
+        let base: BaseClient<OPTIMAL_QP_COUNT> = BaseClient::new(ctx, addr)?;
         let shutdown = Arc::new(AtomicBool::new(false));
 
         let mut mrs = Vec::with_capacity(RX_DEPTH);
@@ -123,9 +123,8 @@ impl Client for IdealThreadedClient {
         })
     }
 
-    fn request(&mut self, size: usize) -> io::Result<Box<[u8]>> {
-        let result = vec![0u8; size].into_boxed_slice();
-        let chunks = (size + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
+    fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
+        let chunks = (dst.len() + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
 
         for chunk in 0..chunks {
             if self.post_tx.send(chunk).is_err() {
@@ -145,7 +144,7 @@ impl Client for IdealThreadedClient {
             }
         }
 
-        Ok(result)
+        Ok(())
     }
 }
 

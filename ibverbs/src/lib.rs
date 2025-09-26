@@ -531,6 +531,7 @@ unsafe impl Send for CompletionQueueInner {}
 unsafe impl Sync for CompletionQueueInner {}
 
 /// A completion queue that allows subscribing to the completion of queued sends and receives.
+#[derive(Clone)]
 pub struct CompletionQueue {
     inner: Arc<CompletionQueueInner>,
 }
@@ -1766,6 +1767,7 @@ unsafe impl Sync for ProtectionDomainInner {}
 unsafe impl Send for ProtectionDomainInner {}
 
 /// A protection domain for a device's context.
+#[derive(Clone)]
 pub struct ProtectionDomain {
     inner: Arc<ProtectionDomainInner>,
 }

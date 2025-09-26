@@ -1,5 +1,5 @@
-use crate::OPTIMAL_MR_SIZE;
-use crate::client::{BaseMultiQPClient, Client};
+use crate::client::{BaseClient, Client};
+use crate::{OPTIMAL_MR_SIZE, OPTIMAL_QP_COUNT};
 use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::collections::HashMap;
 use std::io::ErrorKind;
@@ -8,18 +8,17 @@ use std::{hint, io};
 use tracing::trace;
 
 pub struct PipelineClient {
-    base: BaseMultiQPClient,
+    base: BaseClient<OPTIMAL_QP_COUNT>,
 }
 
 impl Client for PipelineClient {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseMultiQPClient::new::<3>(ctx, addr)?;
+        let base = BaseClient::new(ctx, addr)?;
         Ok(Self { base })
     }
 
-    fn request(&mut self, size: usize) -> io::Result<Box<[u8]>> {
-        let result = vec![0u8; size].into_boxed_slice();
-        let chunks = (size + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
+    fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
+        let chunks = (dst.len() + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
         let mut completions = vec![ibv_wc::default(); 16];
 
         let mut mrs = Vec::with_capacity(chunks);
@@ -30,7 +29,7 @@ impl Client for PipelineClient {
 
         while received < chunks {
             if allocated < chunks {
-                let ptr = result[allocated * OPTIMAL_MR_SIZE..].as_ptr();
+                let ptr = dst[allocated * OPTIMAL_MR_SIZE..].as_ptr();
                 match unsafe {
                     self.base
                         .pd
@@ -100,6 +99,6 @@ impl Client for PipelineClient {
                 received += 1;
             }
         }
-        Ok(result)
+        Ok(())
     }
 }

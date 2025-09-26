@@ -1,5 +1,5 @@
-use crate::OPTIMAL_MR_SIZE;
-use crate::client::{BaseMultiQPClient, Client};
+use crate::client::{BaseClient, Client};
+use crate::{OPTIMAL_MR_SIZE, OPTIMAL_QP_COUNT};
 use ibverbs::{Context, MemoryRegion, OwnedMemoryRegion, ibv_wc};
 use std::collections::VecDeque;
 use std::net::ToSocketAddrs;
@@ -8,13 +8,13 @@ use std::{hint, io};
 const RX_DEPTH: usize = 128;
 
 pub struct CopyClient {
-    base: BaseMultiQPClient,
+    base: BaseClient<OPTIMAL_QP_COUNT>,
     mrs: Vec<OwnedMemoryRegion>,
 }
 
 impl Client for CopyClient {
     fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseMultiQPClient::new::<3>(ctx, addr)?;
+        let base = BaseClient::new(ctx, addr)?;
 
         let mut mrs = Vec::with_capacity(RX_DEPTH);
         for _ in 0..RX_DEPTH {
@@ -33,8 +33,8 @@ impl Client for CopyClient {
         Ok(Self { base, mrs })
     }
 
-    fn request(&mut self, dst: *mut u8, size: usize) -> io::Result<()> {
-        let chunks = (size + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
+    fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
+        let chunks = (dst.len() + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
         let mut completions = vec![ibv_wc::default(); RX_DEPTH];
 
         let mut unused = (0..RX_DEPTH).collect::<VecDeque<usize>>();
@@ -88,13 +88,13 @@ impl Client for CopyClient {
                 let end = start + OPTIMAL_MR_SIZE;
 
                 let src_slice = mr.as_slice();
-                let dest_slice = &mut result[start..end];
+                let dest_slice = &mut dst[start..end];
                 dest_slice.copy_from_slice(src_slice);
 
                 unused.push_back(mr_idx);
                 received += 1;
             }
         }
-        Ok()
+        Ok(())
     }
 }
