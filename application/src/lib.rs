@@ -9,16 +9,16 @@ use std::io;
 pub mod client;
 pub mod server;
 
-pub static KB: usize = 1024;
-pub static MB: usize = 1024 * KB;
-pub static GB: usize = 1024 * MB;
+pub static KiB: usize = 1024;
+pub static KB: usize = 1000;
+pub static MiB: usize = 1024 * KiB;
+pub static MB: usize = 1000 * KB;
+pub static GiB: usize = 1024 * MiB;
+pub static GB: usize = 1000 * MB;
 
 pub const BINCODE_CONFIG: Configuration = standard();
 
-pub const SERVER_DATA_SIZE: usize = 2 * GB;
-pub const OPTIMAL_MR_SIZE: usize = 4 * MB;
-
-pub const OPTIMAL_QP_COUNT: usize = 3;
+pub const SERVER_DATA_SIZE: usize = 2 * GiB;
 
 fn pin_thread_to_node<const NODE: usize>() -> io::Result<()> {
     let tid = hwlocality::current_thread_id();

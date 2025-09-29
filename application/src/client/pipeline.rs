@@ -1,24 +1,23 @@
-use crate::client::{BaseClient, Client};
-use crate::{OPTIMAL_MR_SIZE, OPTIMAL_QP_COUNT};
-use ibverbs::{Context, MemoryRegion, ibv_wc};
+use crate::client::{BaseClient, BlockingClient, ClientConfig};
+use ibverbs::{Context, ibv_wc};
 use std::collections::HashMap;
 use std::io::ErrorKind;
-use std::net::ToSocketAddrs;
 use std::{hint, io};
 use tracing::trace;
 
 pub struct PipelineClient {
-    base: BaseClient<OPTIMAL_QP_COUNT>,
+    base: BaseClient,
 }
 
-impl Client for PipelineClient {
-    fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseClient::new(ctx, addr)?;
+impl BlockingClient for PipelineClient {
+    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
+        let base = BaseClient::new(ctx, cfg)?;
         Ok(Self { base })
     }
 
     fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
-        let chunks = (dst.len() + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
+        let mr_size = self.base.cfg.mr_size;
+        let chunks = (dst.len() + mr_size - 1) / mr_size;
         let mut completions = vec![ibv_wc::default(); 16];
 
         let mut mrs = Vec::with_capacity(chunks);
@@ -29,12 +28,8 @@ impl Client for PipelineClient {
 
         while received < chunks {
             if allocated < chunks {
-                let ptr = dst[allocated * OPTIMAL_MR_SIZE..].as_ptr();
-                match unsafe {
-                    self.base
-                        .pd
-                        .register_unchecked(ptr as *mut u8, OPTIMAL_MR_SIZE)
-                } {
+                let data = &mut dst[allocated * mr_size..(allocated + 1) * mr_size];
+                match unsafe { self.base.pd.register(data) } {
                     Ok(mr) => {
                         trace!("Allocated MR for chunk {}", allocated);
                         mrs.push(mr);
@@ -53,20 +48,18 @@ impl Client for PipelineClient {
                     let remote_slice = self
                         .base
                         .remote
-                        .slice(posted * OPTIMAL_MR_SIZE..(posted + 1) * OPTIMAL_MR_SIZE);
+                        .slice(posted * mr_size..(posted + 1) * mr_size);
 
                     let mut success = false;
-                    for i in 0..self.base.qps.len() {
-                        match unsafe {
-                            self.base.qps[i].post_read(&[local], remote_slice, posted as u64)
-                        } {
+                    for qp in &mut self.base.qps {
+                        match unsafe { qp.post_read(&[local], remote_slice, posted as u64) } {
                             Ok(_) => {
-                                trace!("Posted RDMA read for chunk {} on QP {}", posted, i);
+                                trace!("Posted RDMA read for chunk {}", posted);
                                 success = true;
                                 break;
                             }
                             Err(e) if e.kind() == ErrorKind::OutOfMemory => {
-                                trace!("QP {} out of memory when posting RDMA read", i);
+                                trace!("QP out of memory when posting RDMA read",);
                                 hint::spin_loop();
                             }
                             Err(e) => return Err(e),
@@ -88,7 +81,7 @@ impl Client for PipelineClient {
                 let chunk = completion.wr_id() as usize;
                 trace!("Received completion for chunk {chunk}");
                 if let Some(mr) = outstanding.remove(&chunk) {
-                    mr.deregister()?;
+                    drop(mr);
                     trace!("Deregistered MR for chunk {chunk}");
                 } else {
                     return Err(io::Error::new(

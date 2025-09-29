@@ -1,25 +1,22 @@
-use crate::client::{BaseClient, Client};
-use crate::{OPTIMAL_MR_SIZE, OPTIMAL_QP_COUNT};
-use ibverbs::{Context, MemoryRegion, OwnedMemoryRegion, ibv_wc};
-use std::collections::VecDeque;
-use std::net::ToSocketAddrs;
+use crate::client::{BaseClient, BlockingClient, ClientConfig};
+use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::{hint, io};
 
 const RX_DEPTH: usize = 128;
 
 pub struct CopyClient {
-    base: BaseClient<OPTIMAL_QP_COUNT>,
-    mrs: Vec<OwnedMemoryRegion>,
+    base: BaseClient,
+    mrs: Vec<MemoryRegion>,
 }
 
-impl Client for CopyClient {
-    fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseClient::new(ctx, addr)?;
+impl BlockingClient for CopyClient {
+    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
+        let base = BaseClient::new(ctx, cfg)?;
 
         let mut mrs = Vec::with_capacity(RX_DEPTH);
         for _ in 0..RX_DEPTH {
             loop {
-                match base.pd.allocate::<u8>(OPTIMAL_MR_SIZE) {
+                match base.pd.allocate::<u8>(base.cfg.mr_size) {
                     Ok(mr) => {
                         mrs.push(mr);
                         break;
@@ -34,23 +31,24 @@ impl Client for CopyClient {
     }
 
     fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
-        let chunks = (dst.len() + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
+        let mr_size = self.base.cfg.mr_size;
+        let mut chunks: Vec<_> = dst.chunks_mut(mr_size).collect();
         let mut completions = vec![ibv_wc::default(); RX_DEPTH];
 
-        let mut unused = (0..RX_DEPTH).collect::<VecDeque<usize>>();
+        let mut unused: Vec<_> = (0..RX_DEPTH).collect();
         let mut posted = 0;
         let mut received = 0;
 
-        while received < chunks {
-            while posted < chunks {
-                if let Some(mr_idx) = unused.pop_front() {
+        while received < chunks.len() {
+            while posted < chunks.len() {
+                if let Some(mr_idx) = unused.pop() {
                     let mr = &self.mrs[mr_idx];
                     let local = mr.slice_local(..);
 
                     let remote_slice = self
                         .base
                         .remote
-                        .slice(posted * OPTIMAL_MR_SIZE..(posted + 1) * OPTIMAL_MR_SIZE);
+                        .slice(posted * mr_size..(posted + 1) * mr_size);
 
                     let chunk_idx = posted;
                     let wr_id = (chunk_idx as u64) << 32 | (mr_idx as u64);
@@ -70,7 +68,7 @@ impl Client for CopyClient {
                         }
                     }
                     if !success {
-                        unused.push_front(mr_idx);
+                        unused.push(mr_idx);
                         break;
                     }
                 } else {
@@ -84,14 +82,12 @@ impl Client for CopyClient {
                 let mr_idx = (wr_id & 0xFFFFFFFF) as usize;
 
                 let mr = &self.mrs[mr_idx];
-                let start = chunk_idx * OPTIMAL_MR_SIZE;
-                let end = start + OPTIMAL_MR_SIZE;
 
                 let src_slice = mr.as_slice();
-                let dest_slice = &mut dst[start..end];
+                let dest_slice = &mut chunks[chunk_idx][..];
                 dest_slice.copy_from_slice(src_slice);
 
-                unused.push_back(mr_idx);
+                unused.push(mr_idx);
                 received += 1;
             }
         }

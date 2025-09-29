@@ -1,17 +1,18 @@
 use application::client::{
-    AsyncClient, Client, CopyClient, CopyThreadedClient, IdealClient, IdealThreadedClient,
-    NaiveClient, PipelineAsyncClient, PipelineClient, PipelineThreadedClient,
+    AsyncClient, BlockingClient, CopyClient, CopyThreadedClient, IdealClient, NaiveClient,
+    NonBlockingClient, PipelineAsyncClient, PipelineClient, PipelineThreadedClient,
 };
 use application::server::Server;
-use application::{GB, OPTIMAL_MR_SIZE};
+use application::{KiB, MiB, client, GiB, GB};
+use client::ClientConfig;
 use ibverbs::Context;
-use std::net::{IpAddr, ToSocketAddrs};
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
 use std::{io, time};
 use tokio::runtime;
-use tracing::{Level, info, info_span};
+use tracing::{Level, info};
 
-const MIN_REQUEST_SIZE: usize = OPTIMAL_MR_SIZE;
-const MAX_REQUEST_SIZE: usize = 1 * GB;
+const REQUEST_SIZE: usize = 512 * MiB;
+const REQUEST_COUNT: usize = 100;
 
 #[derive(clap::Parser, Debug)]
 #[command(version, about = "Start an RDMA server or connect as a client.")]
@@ -19,6 +20,12 @@ struct Args {
     server: Option<IpAddr>,
     #[arg(long, value_enum, required_if_eq("server", "Some"))]
     mode: Option<Mode>,
+
+    #[arg(short, long, default_value_t = 4096)]
+    size_kb: usize,
+
+    #[arg(short, long, default_value_t = 2)]
+    qp_count: usize,
 
     #[arg(short, long, default_value_t = 18515)]
     port: u16,
@@ -30,7 +37,6 @@ struct Args {
 #[derive(clap::ValueEnum, Clone, Debug)]
 enum Mode {
     Ideal,
-    IdealThreaded,
     Copy,
     CopyThreaded,
     Naive,
@@ -58,22 +64,28 @@ fn run(args: Args) -> io::Result<()> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "No RDMA devices found"))?
         .open()?;
 
-    let listen_addr = format!("0:0:0:0:{}", args.port);
+    let listen_addr = format!("0.0.0.0:{}", args.port);
     match args.server {
         None => run_server(ctx, listen_addr),
         Some(addr) => {
-            let connect_addr = format!("{}:{}", addr, args.port);
+            let connect_addr = SocketAddr::new(addr, args.port);
+            let cfg = ClientConfig {
+                server_addr: connect_addr,
+                mr_size: args.size_kb * KiB,
+                qp_count: args.qp_count,
+            };
             match args.mode.unwrap() {
-                Mode::Naive => run_client::<NaiveClient>(ctx, connect_addr),
-                Mode::Copy => run_client::<CopyClient>(ctx, connect_addr),
-                Mode::CopyThreaded => run_client::<CopyThreadedClient>(ctx, connect_addr),
-                Mode::Ideal => run_client::<IdealClient>(ctx, connect_addr),
-                Mode::IdealThreaded => run_client::<IdealThreadedClient>(ctx, connect_addr),
-                Mode::Pipeline => run_client::<PipelineClient>(ctx, connect_addr),
-                Mode::PipelineThreaded => run_client::<PipelineThreadedClient>(ctx, connect_addr),
+                Mode::Naive => run_client_blocking::<NaiveClient>(ctx, cfg),
+                Mode::Copy => run_client_blocking::<CopyClient>(ctx, cfg),
+                Mode::CopyThreaded => run_client_non_blocking::<CopyThreadedClient>(ctx, cfg),
+                Mode::Ideal => run_client_blocking::<IdealClient>(ctx, cfg),
+                Mode::Pipeline => run_client_blocking::<PipelineClient>(ctx, cfg),
+                Mode::PipelineThreaded => {
+                    run_client_non_blocking::<PipelineThreadedClient>(ctx, cfg)
+                }
                 Mode::PipelineAsync => {
                     runtime::Runtime::new()?
-                        .block_on(async_run_client::<PipelineAsyncClient>(ctx, connect_addr))
+                        .block_on(async_run_client::<PipelineAsyncClient>(ctx, cfg))
                 }
             }
         }
@@ -87,62 +99,73 @@ fn run_server(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<()> {
     server.serve()
 }
 
-fn run_client<C: Client>(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<()> {
-    let mut client = C::new(ctx, addr)?;
+fn run_client_blocking<C: BlockingClient>(ctx: Context, cfg: ClientConfig) -> io::Result<()> {
+    let mut client = C::new(ctx, cfg)?;
     info!("Client started. Sending requests...");
 
     let start = time::Instant::now();
-    let mut received = 0;
-    let mut result = vec![0u8; MAX_REQUEST_SIZE];
-    for size in (MIN_REQUEST_SIZE..=MAX_REQUEST_SIZE).step_by(OPTIMAL_MR_SIZE) {
-        let span = info_span!("request", request_id = size);
-        let _enter = span.enter();
-
+    let mut result = vec![0u8; REQUEST_SIZE * REQUEST_COUNT];
+    for chunk in result.chunks_exact_mut(REQUEST_SIZE) {
         info!("Sending");
-        let _ = client.request(&mut result[0..size])?;
+        let _ = client.request(chunk)?;
         info!("Received");
-        received += size;
     }
-    let duration = start.elapsed();
-    let received_gb = received as f64 / 2f64.powi(30);
 
-    println!(
-        "Received {} GiB in {:?} ({} GiB/s)",
-        received_gb,
-        duration,
-        received_gb / duration.as_secs_f64()
+    let duration = start.elapsed();
+    info!(
+        "{} GB/s",
+        (REQUEST_COUNT * REQUEST_SIZE) as f64 / duration.as_secs_f64() / GB as f64
     );
 
     Ok(())
 }
 
-async fn async_run_client<C: AsyncClient>(
+fn run_client_non_blocking<C: NonBlockingClient>(
     ctx: Context,
-    addr: impl ToSocketAddrs,
+    cfg: ClientConfig,
 ) -> io::Result<()> {
-    let mut client = C::new(ctx, addr).await?;
+    let mut client = C::new(ctx, cfg)?;
     info!("Client started. Sending requests...");
 
     let start = time::Instant::now();
-    let mut received = 0;
-    let mut result = vec![0u8; MAX_REQUEST_SIZE];
-    for size in (MIN_REQUEST_SIZE..=MAX_REQUEST_SIZE).step_by(OPTIMAL_MR_SIZE) {
-        let span = info_span!("request", request_id = size);
-        let _enter = span.enter();
-
+    let mut handles = Vec::new();
+    let mut result = vec![0u8; REQUEST_SIZE * REQUEST_COUNT];
+    for chunk in result.chunks_exact_mut(REQUEST_SIZE) {
         info!("Sending");
-        let _ = client.request(&mut result[0..size]).await?;
-        info!("Received");
-        received += size;
+        handles.push(client.request(chunk)?);
     }
-    let duration = start.elapsed();
-    let received_gb = received as f64 / 2f64.powi(30);
+    for handle in handles {
+        handle.wait_received();
+        info!("Received");
+    }
 
-    println!(
-        "Received {} GiB in {:?} ({} GiB/s)",
-        received_gb,
-        duration,
-        received_gb / duration.as_secs_f64()
+    let duration = start.elapsed();
+    info!(
+        "{} GB/s",
+        (REQUEST_COUNT * REQUEST_SIZE) as f64 / duration.as_secs_f64() / GB as f64
+    );
+
+    Ok(())
+}
+
+async fn async_run_client<C: AsyncClient>(ctx: Context, cfg: ClientConfig) -> io::Result<()> {
+    let mut client = C::new(ctx, cfg).await?;
+    info!("Client started. Sending requests...");
+
+    let start = time::Instant::now();
+
+    let mut result = vec![0u8; REQUEST_SIZE * REQUEST_COUNT];
+    for chunk in result.chunks_mut(REQUEST_SIZE) {
+        // TODO: fire and forget; doesnt work with lifetime of chunk as it cant outlive its buffer
+        info!("Sending");
+        client.request(chunk).await?;
+        info!("Received");
+    }
+
+    let duration = start.elapsed();
+    info!(
+        "{} GB/s",
+        (REQUEST_COUNT * REQUEST_SIZE) as f64 / duration.as_secs_f64() / GB as f64
     );
 
     Ok(())

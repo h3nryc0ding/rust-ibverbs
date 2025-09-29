@@ -1,8 +1,6 @@
-use crate::client::{AsyncClient, BaseClient};
-use crate::{OPTIMAL_MR_SIZE, OPTIMAL_QP_COUNT};
-use ibverbs::{BorrowedMemoryRegion, Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
+use crate::client::{AsyncClient, BaseClient, ClientConfig};
+use ibverbs::{Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
 use std::collections::HashMap;
-use std::net::ToSocketAddrs;
 use std::sync::Arc;
 use std::{hint, io};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, error::TryRecvError};
@@ -10,11 +8,11 @@ use tokio::sync::{Semaphore, mpsc};
 use tokio::task;
 use tracing::trace;
 
-const CONCURRENT_REGISTRATIONS: usize = 2;
-const CONCURRENT_DEREGISTRATIONS: usize = 1;
+const CONCURRENT_REGISTRATIONS: usize = 4;
+const CONCURRENT_DEREGISTRATIONS: usize = 2;
 
 pub struct PipelineAsyncClient {
-    base: BaseClient<OPTIMAL_QP_COUNT>,
+    base: BaseClient,
 
     reg_tx: UnboundedSender<RegistrationRequest>,
     post_rx: UnboundedReceiver<PostRequest>,
@@ -22,8 +20,8 @@ pub struct PipelineAsyncClient {
 }
 
 impl AsyncClient for PipelineAsyncClient {
-    async fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseClient::new(ctx, addr)?;
+    async fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
+        let base = BaseClient::new(ctx, cfg)?;
 
         let (reg_tx, mut reg_rx) = mpsc::unbounded_channel();
         let (post_tx, post_rx) = mpsc::unbounded_channel();
@@ -42,7 +40,7 @@ impl AsyncClient for PipelineAsyncClient {
                         let RegistrationRequest { src, remote } = request;
                         trace!("Registering MR");
                         let mr = unsafe {
-                            pd.register_unchecked(src as *mut u8, OPTIMAL_MR_SIZE)
+                            pd.register_raw(src as *mut u8, base.cfg.mr_size)
                                 .unwrap()
                         };
                         trace!("MR registered");
@@ -62,7 +60,7 @@ impl AsyncClient for PipelineAsyncClient {
                     task::spawn_blocking(move || {
                         let DeregistrationRequest { mr } = request;
                         trace!("Deregistering MR");
-                        mr.deregister().unwrap();
+                        drop(mr);
                         trace!("MR deregistered");
                         drop(permit);
                     });
@@ -79,7 +77,8 @@ impl AsyncClient for PipelineAsyncClient {
     }
 
     async fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
-        let chunks = (dst.len() + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
+        let mr_size = self.base.cfg.mr_size;
+        let chunks = (dst.len() + mr_size - 1) / mr_size;
         let mut completions = vec![ibv_wc::default(); chunks];
 
         let mut posted = 0u64;
@@ -87,11 +86,11 @@ impl AsyncClient for PipelineAsyncClient {
         let mut outstanding = HashMap::new();
 
         for chunk in 0..chunks {
-            let src = dst[chunk * OPTIMAL_MR_SIZE..].as_ptr() as usize;
+            let src = dst[chunk * mr_size..].as_ptr() as usize;
             let remote = self
                 .base
                 .remote
-                .slice(chunk * OPTIMAL_MR_SIZE..(chunk + 1) * OPTIMAL_MR_SIZE);
+                .slice(chunk * mr_size..(chunk + 1) * mr_size);
 
             self.reg_tx
                 .send(RegistrationRequest { src, remote })
@@ -176,10 +175,10 @@ struct RegistrationRequest {
 }
 
 struct PostRequest {
-    mr: BorrowedMemoryRegion<'static>,
+    mr: MemoryRegion,
     remote: RemoteMemorySlice,
 }
 
 struct DeregistrationRequest {
-    mr: BorrowedMemoryRegion<'static>,
+    mr: MemoryRegion,
 }

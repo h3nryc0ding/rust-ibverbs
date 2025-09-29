@@ -1,7 +1,7 @@
 use criterion::BatchSize::PerIteration;
 use criterion::{criterion_group, criterion_main, Criterion};
 use ffi::{ibv_qp_type, ibv_wc};
-use ibverbs::{CompletionQueue, MemoryRegion};
+use ibverbs::CompletionQueue;
 use std::hint;
 use std::time::Duration;
 
@@ -19,7 +19,7 @@ pub fn benchmark(c: &mut Criterion) {
         .unwrap();
     let pd = ctx.alloc_pd().unwrap();
     let cq = ctx.create_cq(2i32.pow(16), 0).unwrap();
-    let mut qp = {
+    let qp = {
         let pqp = pd
             .create_qp(&cq, &cq, ibv_qp_type::IBV_QPT_RC)
             .unwrap()

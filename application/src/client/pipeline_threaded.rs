@@ -1,168 +1,218 @@
-use crate::client::{BaseClient, Client};
-use crate::{OPTIMAL_MR_SIZE, OPTIMAL_QP_COUNT};
-use ibverbs::{BorrowedMemoryRegion, Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
-use std::collections::HashMap;
-use std::net::ToSocketAddrs;
-use std::sync::mpsc::{Receiver, Sender, TryRecvError};
-use std::sync::{Arc, Mutex, mpsc};
-use std::{hint, io, thread};
-use tracing::trace;
-
-const CONCURRENT_REGISTRATIONS: usize = 2;
-const CONCURRENT_DEREGISTRATIONS: usize = 1;
+use crate::client::{BaseClient, ClientConfig, NonBlockingClient, RequestHandle, RequestState};
+use crossbeam::channel;
+use crossbeam::channel::Sender;
+use dashmap::DashMap;
+use ibverbs::{Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::thread::JoinHandle;
+use std::{io, thread};
 
 pub struct PipelineThreadedClient {
-    base: BaseClient<OPTIMAL_QP_COUNT>,
+    id: AtomicUsize,
+    remote: RemoteMemorySlice,
 
-    reg_tx: Sender<RegistrationRequest>,
-    post_rx: Receiver<PostRequest>,
-    dereg_tx: Sender<DeregistrationRequest>,
+    reg_tx: Sender<RegistrationMessage>,
+
+    config: ClientConfig,
+    workers: Vec<JoinHandle<()>>,
 }
 
-impl Client for PipelineThreadedClient {
-    fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseClient::new(ctx, addr)?;
+const CONCURRENT_REGISTRATIONS: usize = 6;
+const CONCURRENT_DEREGISTRATIONS: usize = 2;
 
-        let (reg_tx, reg_rx) = mpsc::channel();
-        let (post_tx, post_rx) = mpsc::channel();
-        let (dereg_tx, dereg_rx) = mpsc::channel();
+impl NonBlockingClient for PipelineThreadedClient {
+    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
+        let mut base = BaseClient::new(ctx, cfg)?;
+        let id = AtomicUsize::new(0);
 
-        let reg_rx = Arc::new(Mutex::new(reg_rx));
+        let (reg_tx, reg_rx) = channel::unbounded();
+        let (post_tx, post_rx) = channel::unbounded();
+        let (dereg_tx, dereg_rx) = channel::unbounded();
+
+        let pending = Arc::new(DashMap::new());
+
+        let mut workers = Vec::new();
         for _ in 0..CONCURRENT_REGISTRATIONS {
             let pd = base.pd.clone();
             let reg_rx = reg_rx.clone();
             let post_tx = post_tx.clone();
-            thread::spawn(move || {
-                while let Ok(request) = {
-                    let reg_rx = reg_rx.lock().unwrap();
-                    reg_rx.recv()
-                } {
-                    let RegistrationRequest { src, remote } = request;
-                    trace!("Registering MR");
-                    let mr =
-                        unsafe { pd.register_unchecked(src as *mut u8, OPTIMAL_MR_SIZE) }.unwrap();
-                    trace!("MR registered");
-                    let request = PostRequest { mr, remote };
-                    post_tx.send(request).unwrap();
+
+            let handle = thread::spawn(move || {
+                while let Ok(msg) = reg_rx.recv() {
+                    let RegistrationMessage {
+                        id,
+                        chunk,
+                        ptr,
+                        len,
+                        state,
+                        remote,
+                    } = msg;
+                    let mr = unsafe { pd.register_raw(ptr, len).unwrap() };
+                    state.registered.fetch_add(1, Ordering::Relaxed);
+                    let msg = PostMessage {
+                        id,
+                        chunk,
+                        state,
+                        mr,
+                        remote,
+                    };
+                    post_tx.send(msg).unwrap()
                 }
             });
+
+            workers.push(handle);
         }
 
-        let dereg_rx = Arc::new(Mutex::new(dereg_rx));
-        for _ in 0..CONCURRENT_DEREGISTRATIONS {
-            let dereg_rx = dereg_rx.clone();
-            thread::spawn(move || {
-                while let Ok(request) = {
-                    let dereg_rx = dereg_rx.lock().unwrap();
-                    dereg_rx.recv()
-                } {
-                    let DeregistrationRequest { mr } = request;
-                    trace!("Deregistering MR");
-                    mr.deregister().unwrap();
-                    trace!("MR deregistered");
+        {
+            let pending = pending.clone();
+            let post_rx = post_rx.clone();
+            let handle = thread::spawn(move || {
+                while let Ok(msg) = post_rx.recv() {
+                    let PostMessage {
+                        id,
+                        chunk,
+                        state,
+                        mr,
+                        remote,
+                    } = msg;
+
+                    let local = mr.slice_local(..);
+                    let wr_id = encode_wr_id(id, chunk);
+                    'l: loop {
+                        for qp in &mut base.qps {
+                            match unsafe { qp.post_read(&[local], remote, wr_id) } {
+                                Ok(_) => break 'l,
+                                Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
+                                Err(e) => panic!("{:?}", e),
+                            }
+                        }
+                    }
+
+                    state.posted.fetch_add(1, Ordering::Relaxed);
+                    pending.insert(wr_id, (state, mr));
                 }
             });
+            workers.push(handle);
+        }
+
+        {
+            let pending = pending.clone();
+            let handle = thread::spawn(move || {
+                let mut completions = [ibv_wc::default(); 16];
+                loop {
+                    let completed = base.cq.poll(&mut completions).unwrap();
+                    for completion in completed {
+                        assert!(completion.is_valid());
+                        let wr_id = completion.wr_id();
+                        if let Some((_, (state, mr))) = pending.remove(&wr_id) {
+                            let (id, chunk) = decode_wr_id(wr_id);
+                            state.received.fetch_add(1, Ordering::Relaxed);
+                            let msg = DeregistrationMessage {
+                                id,
+                                chunk,
+                                state,
+                                mr,
+                            };
+                            dereg_tx.send(msg).unwrap()
+                        } else {
+                            panic!("Unknown WR ID: {wr_id}")
+                        }
+                    }
+                }
+            });
+            workers.push(handle);
+        }
+
+        for _ in 0..CONCURRENT_DEREGISTRATIONS {
+            let dereg_rx = dereg_rx.clone();
+
+            let handle = thread::spawn(move || {
+                while let Ok(msg) = dereg_rx.recv() {
+                    let DeregistrationMessage {
+                        id,
+                        chunk,
+                        state,
+                        mr,
+                    } = msg;
+                    drop(mr);
+                    state.deregistered.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+            workers.push(handle);
         }
 
         Ok(Self {
-            base,
+            id,
+            remote: base.remote,
             reg_tx,
-            post_rx,
-            dereg_tx,
+            config: base.cfg,
+            workers,
         })
     }
 
-    fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
-        let chunks = (dst.len() + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
-        let mut completions = vec![ibv_wc::default(); chunks];
+    fn request(&mut self, dst: &mut [u8]) -> io::Result<RequestHandle> {
+        let chunk_size = self.config.mr_size;
 
-        let mut posted = 0u64;
-        let mut finished = 0;
-        let mut outstanding = HashMap::new();
-        for chunk in 0..chunks {
-            let src = dst[chunk * OPTIMAL_MR_SIZE..].as_ptr();
-            let remote = self
-                .base
-                .remote
-                .slice(chunk * OPTIMAL_MR_SIZE..(chunk + 1) * OPTIMAL_MR_SIZE);
+        let id = self.id.fetch_add(1, Ordering::Relaxed);
+        let chunks: Vec<_> = dst.chunks_mut(chunk_size).collect();
+
+        let handle = RequestHandle {
+            id,
+            chunks: chunks.len(),
+            state: Default::default(),
+        };
+
+        for (idx, chunk) in chunks.into_iter().enumerate() {
             self.reg_tx
-                .send(RegistrationRequest { src, remote })
-                .unwrap();
+                .send(RegistrationMessage {
+                    id,
+                    chunk: idx,
+                    state: handle.state.clone(),
+                    ptr: chunk.as_mut_ptr(),
+                    len: chunk.len(),
+                    remote: self.remote.slice(idx * chunk_size..(idx + 1) * chunk_size),
+                })
+                .unwrap()
         }
 
-        let mut retries = Vec::new();
-        while finished < chunks {
-            while posted < chunks as u64 {
-                let req = if let Some(req) = retries.pop() {
-                    req
-                } else {
-                    match self.post_rx.try_recv() {
-                        Ok(req) => req,
-                        Err(TryRecvError::Empty) => break,
-                        Err(e) => {
-                            return Err(io::Error::new(
-                                io::ErrorKind::Other,
-                                format!("registration thread disconnected: {e}"),
-                            ));
-                        }
-                    }
-                };
-
-                let mr = req.mr;
-                let remote = req.remote;
-                let mut success = false;
-                for qp in &mut self.base.qps {
-                    match unsafe { qp.post_read(&[mr.slice_local(..)], remote, posted) } {
-                        Ok(_) => {
-                            success = true;
-                            break;
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {
-                            hint::spin_loop();
-                        }
-                        Err(e) => return Err(e),
-                    }
-                }
-                if success {
-                    trace!("chunk {posted} posted");
-                    outstanding.insert(posted, mr);
-                    posted += 1;
-                } else {
-                    trace!("all QPs are busy");
-                    retries.push(PostRequest { mr, remote });
-                    break;
-                }
-            }
-
-            for completion in self.base.cq.poll(&mut completions)? {
-                let wr_id = completion.wr_id();
-                trace!("completion received: wr_id={wr_id}");
-                assert!(completion.is_valid());
-
-                if let Some(mr) = outstanding.remove(&wr_id) {
-                    finished += 1;
-                    self.dereg_tx.send(DeregistrationRequest { mr }).unwrap();
-                }
-            }
-        }
-
-        Ok(())
+        Ok(handle)
     }
 }
 
-struct RegistrationRequest {
-    src: *const u8,
+struct RegistrationMessage {
+    id: usize,
+    chunk: usize,
+    state: Arc<RequestState>,
+    ptr: *mut u8,
+    len: usize,
     remote: RemoteMemorySlice,
 }
 
-struct PostRequest {
-    mr: BorrowedMemoryRegion<'static>,
+// SAFETY: caller needs to ensure that dst slice exists until pipeline finished
+unsafe impl Send for RegistrationMessage {}
+
+struct PostMessage {
+    id: usize,
+    chunk: usize,
+    state: Arc<RequestState>,
+    mr: MemoryRegion,
     remote: RemoteMemorySlice,
 }
 
-struct DeregistrationRequest {
-    mr: BorrowedMemoryRegion<'static>,
+struct DeregistrationMessage {
+    id: usize,
+    chunk: usize,
+    state: Arc<RequestState>,
+    mr: MemoryRegion,
 }
 
-unsafe impl Send for RegistrationRequest {}
-unsafe impl Sync for RegistrationRequest {}
+fn encode_wr_id(req_id: usize, chunk_id: usize) -> u64 {
+    ((req_id as u64) << 32) | (chunk_id as u64)
+}
+
+fn decode_wr_id(wr_id: u64) -> (usize, usize) {
+    let req_id = (wr_id >> 32) as usize;
+    let chunk_id = (wr_id & u32::MAX as u64) as usize;
+    (req_id, chunk_id)
+}

@@ -1,8 +1,8 @@
-use crate::client::{BaseClient, Client};
-use crate::{OPTIMAL_MR_SIZE, OPTIMAL_QP_COUNT, pin_thread_to_node};
-use ibverbs::{Context, MemoryRegion, OwnedMemoryRegion, ibv_wc};
+use crate::client::{BaseClient, NonBlockingClient, ClientConfig, RequestHandle};
+use crate::pin_thread_to_node;
+use ibverbs::{Context, MemoryRegion, ibv_wc};
+use mpsc::Sender;
 use std::collections::HashMap;
-use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::{hint, io, ptr, thread};
@@ -14,21 +14,22 @@ const COPY_THREADS: usize = 8;
 const NUMA_NODE: usize = 1;
 
 pub struct CopyThreadedClient {
-    base: BaseClient<OPTIMAL_QP_COUNT>,
-    mrs: Arc<Mutex<Vec<OwnedMemoryRegion>>>,
+    base: BaseClient,
+    mrs: Arc<Mutex<Vec<MemoryRegion>>>,
 
-    sender: mpsc::Sender<CopyRequest>,
+    sender: Sender<CopyRequest>,
     finished: Arc<AtomicUsize>,
 }
 
-impl Client for CopyThreadedClient {
-    fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseClient::new(ctx, addr)?;
+impl NonBlockingClient for CopyThreadedClient {
+    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
+        let base = BaseClient::new(ctx, cfg)?;
+        let mr_size = base.cfg.mr_size;
 
         let mut mrs = Vec::with_capacity(RX_DEPTH);
         for _ in 0..RX_DEPTH {
             loop {
-                match base.pd.allocate::<u8>(OPTIMAL_MR_SIZE) {
+                match base.pd.allocate::<u8>(mr_size) {
                     Ok(mr) => {
                         mrs.push(mr);
                         break;
@@ -58,13 +59,13 @@ impl Client for CopyThreadedClient {
                     let CopyRequest { mr, dst } = request;
                     trace!(
                         "copying {} from {:?} into {}",
-                        OPTIMAL_MR_SIZE,
+                        mr_size,
                         mr.as_ptr(),
                         dst as usize
                     );
                     let src = mr.as_ptr();
                     unsafe {
-                        ptr::copy_nonoverlapping(src, dst, OPTIMAL_MR_SIZE);
+                        ptr::copy_nonoverlapping(src, dst, mr_size);
                     }
                     {
                         trace!("returning {:?}", mr.as_ptr());
@@ -85,8 +86,9 @@ impl Client for CopyThreadedClient {
         })
     }
 
-    fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
-        let chunks = (dst.len() + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
+    fn request(&mut self, dst: &mut [u8]) -> io::Result<RequestHandle> {
+        let mr_size = self.base.cfg.mr_size;
+        let chunks = (dst.len() + mr_size - 1) / mr_size;
         let mut completions = vec![ibv_wc::default(); RX_DEPTH];
         self.finished.store(0, Ordering::SeqCst);
 
@@ -101,7 +103,7 @@ impl Client for CopyThreadedClient {
                     let remote_slice = self
                         .base
                         .remote
-                        .slice(posted * OPTIMAL_MR_SIZE..(posted + 1) * OPTIMAL_MR_SIZE);
+                        .slice(posted * mr_size..(posted + 1) * mr_size);
 
                     let chunk_idx = posted as u64;
                     let mut success = false;
@@ -137,7 +139,7 @@ impl Client for CopyThreadedClient {
                 let chunk_idx = wr_id as usize;
 
                 if let Some(mr) = outstanding.remove(&chunk_idx) {
-                    let dst = dst[chunk_idx * OPTIMAL_MR_SIZE..].as_ptr() as *mut u8;
+                    let dst = dst[chunk_idx * mr_size..].as_ptr() as *mut u8;
                     let request = CopyRequest { mr, dst };
                     self.sender.send(request).unwrap();
                 }
@@ -148,12 +150,16 @@ impl Client for CopyThreadedClient {
             hint::spin_loop();
         }
 
-        Ok(())
+        Ok(RequestHandle {
+            id: 0,
+            chunks,
+            state: Default::default(),
+        })
     }
 }
 
 struct CopyRequest {
-    mr: OwnedMemoryRegion,
+    mr: MemoryRegion,
     dst: *mut u8,
 }
 

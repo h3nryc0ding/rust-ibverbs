@@ -1,25 +1,23 @@
-use crate::client::{BaseClient, Client};
-use crate::{OPTIMAL_MR_SIZE, OPTIMAL_QP_COUNT};
-use ibverbs::{Context, MemoryRegion, OwnedMemoryRegion, ibv_wc};
+use crate::client::{BaseClient, BlockingClient, ClientConfig};
+use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::collections::VecDeque;
-use std::net::ToSocketAddrs;
 use std::{hint, io};
 
 const RX_DEPTH: usize = 128;
 
 pub struct IdealClient {
-    base: BaseClient<OPTIMAL_QP_COUNT>,
-    mrs: Vec<OwnedMemoryRegion>,
+    base: BaseClient,
+    mrs: Vec<MemoryRegion>,
 }
 
-impl Client for IdealClient {
-    fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let base = BaseClient::new(ctx, addr)?;
+impl BlockingClient for IdealClient {
+    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
+        let base = BaseClient::new(ctx, cfg)?;
 
         let mut mrs = Vec::with_capacity(RX_DEPTH);
         for _ in 0..RX_DEPTH {
             loop {
-                match base.pd.allocate::<u8>(OPTIMAL_MR_SIZE) {
+                match base.pd.allocate::<u8>(base.cfg.mr_size) {
                     Ok(mr) => {
                         mrs.push(mr);
                         break;
@@ -34,7 +32,8 @@ impl Client for IdealClient {
     }
 
     fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
-        let chunks = (dst.len() + OPTIMAL_MR_SIZE - 1) / OPTIMAL_MR_SIZE;
+        let mr_size = self.base.cfg.mr_size;
+        let chunks = (dst.len() + mr_size - 1) / mr_size;
         let mut completions = vec![ibv_wc::default(); RX_DEPTH];
 
         let mut unused = (0..RX_DEPTH).collect::<VecDeque<usize>>();
@@ -49,7 +48,7 @@ impl Client for IdealClient {
                     let remote_slice = self
                         .base
                         .remote
-                        .slice(posted * OPTIMAL_MR_SIZE..(posted + 1) * OPTIMAL_MR_SIZE);
+                        .slice(posted * mr_size..(posted + 1) * mr_size);
 
                     let mut success = false;
                     for i in 0..self.base.qps.len() {
