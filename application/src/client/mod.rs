@@ -4,6 +4,7 @@ mod ideal;
 mod ideal_threaded;
 mod naive;
 mod pipeline;
+mod pipeline_async;
 mod pipeline_threaded;
 
 use crate::BINCODE_CONFIG;
@@ -20,6 +21,7 @@ pub use crate::client::ideal::IdealClient;
 pub use crate::client::ideal_threaded::IdealThreadedClient;
 pub use crate::client::naive::NaiveClient;
 pub use crate::client::pipeline::PipelineClient;
+pub use crate::client::pipeline_async::PipelineAsyncClient;
 pub use crate::client::pipeline_threaded::PipelineThreadedClient;
 
 pub struct BaseClient<const QPS: usize> {
@@ -68,9 +70,12 @@ impl<const QPS: usize> BaseClient<QPS> {
     }
 }
 
-pub trait Client {
-    fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self>
-    where
-        Self: Sized;
+pub trait Client: Sized {
+    fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self>;
     fn request(&mut self, dst: &mut [u8]) -> io::Result<()>;
+}
+
+pub trait AsyncClient: Sized {
+    fn new(ctx: Context, addr: impl ToSocketAddrs) -> impl Future<Output = io::Result<Self>>;
+    fn request(&mut self, dst: &mut [u8]) -> impl Future<Output = io::Result<()>>;
 }

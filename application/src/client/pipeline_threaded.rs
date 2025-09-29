@@ -1,5 +1,5 @@
-use crate::OPTIMAL_MR_SIZE;
 use crate::client::{BaseClient, Client};
+use crate::{OPTIMAL_MR_SIZE, OPTIMAL_QP_COUNT};
 use ibverbs::{BorrowedMemoryRegion, Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
 use std::collections::HashMap;
 use std::net::ToSocketAddrs;
@@ -8,11 +8,11 @@ use std::sync::{Arc, Mutex, mpsc};
 use std::{hint, io, thread};
 use tracing::trace;
 
-const THREADS_REGISTRATION: usize = 2;
-const THREADS_DEREGISTRATION: usize = 1;
+const CONCURRENT_REGISTRATIONS: usize = 2;
+const CONCURRENT_DEREGISTRATIONS: usize = 1;
 
 pub struct PipelineThreadedClient {
-    base: BaseClient<3>,
+    base: BaseClient<OPTIMAL_QP_COUNT>,
 
     reg_tx: Sender<RegistrationRequest>,
     post_rx: Receiver<PostRequest>,
@@ -28,7 +28,7 @@ impl Client for PipelineThreadedClient {
         let (dereg_tx, dereg_rx) = mpsc::channel();
 
         let reg_rx = Arc::new(Mutex::new(reg_rx));
-        for _ in 0..THREADS_REGISTRATION {
+        for _ in 0..CONCURRENT_REGISTRATIONS {
             let pd = base.pd.clone();
             let reg_rx = reg_rx.clone();
             let post_tx = post_tx.clone();
@@ -49,7 +49,7 @@ impl Client for PipelineThreadedClient {
         }
 
         let dereg_rx = Arc::new(Mutex::new(dereg_rx));
-        for _ in 0..THREADS_DEREGISTRATION {
+        for _ in 0..CONCURRENT_DEREGISTRATIONS {
             let dereg_rx = dereg_rx.clone();
             thread::spawn(move || {
                 while let Ok(request) = {
