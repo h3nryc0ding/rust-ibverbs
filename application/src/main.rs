@@ -3,22 +3,23 @@ use application::client::{
     NonBlockingClient, PipelineAsyncClient, PipelineClient, PipelineThreadedClient,
 };
 use application::server::Server;
-use application::{KiB, MiB, client, GiB, GB};
+use application::{GB, GI_B, KI_B, MI_B, client};
 use client::ClientConfig;
 use ibverbs::Context;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
-use std::{io, time};
+use std::{io, thread, time};
 use tokio::runtime;
 use tracing::{Level, info};
 
-const REQUEST_SIZE: usize = 512 * MiB;
+const REQUEST_SIZE: usize = 512 * MI_B;
 const REQUEST_COUNT: usize = 100;
 
 #[derive(clap::Parser, Debug)]
 #[command(version, about = "Start an RDMA server or connect as a client.")]
 struct Args {
+    #[arg(requires = "mode")]
     server: Option<IpAddr>,
-    #[arg(long, value_enum, required_if_eq("server", "Some"))]
+    #[arg(long, value_enum, requires = "server")]
     mode: Option<Mode>,
 
     #[arg(short, long, default_value_t = 4096)]
@@ -71,7 +72,7 @@ fn run(args: Args) -> io::Result<()> {
             let connect_addr = SocketAddr::new(addr, args.port);
             let cfg = ClientConfig {
                 server_addr: connect_addr,
-                mr_size: args.size_kb * KiB,
+                mr_size: args.size_kb * KI_B,
                 qp_count: args.qp_count,
             };
             match args.mode.unwrap() {
@@ -112,6 +113,7 @@ fn run_client_blocking<C: BlockingClient>(ctx: Context, cfg: ClientConfig) -> io
     }
 
     let duration = start.elapsed();
+    validate(result);
     info!(
         "{} GB/s",
         (REQUEST_COUNT * REQUEST_SIZE) as f64 / duration.as_secs_f64() / GB as f64
@@ -135,11 +137,12 @@ fn run_client_non_blocking<C: NonBlockingClient>(
         handles.push(client.request(chunk)?);
     }
     for handle in handles {
-        handle.wait_received();
+        handle.wait();
         info!("Received");
     }
 
     let duration = start.elapsed();
+    validate(result);
     info!(
         "{} GB/s",
         (REQUEST_COUNT * REQUEST_SIZE) as f64 / duration.as_secs_f64() / GB as f64
@@ -148,25 +151,43 @@ fn run_client_non_blocking<C: NonBlockingClient>(
     Ok(())
 }
 
-async fn async_run_client<C: AsyncClient>(ctx: Context, cfg: ClientConfig) -> io::Result<()> {
-    let mut client = C::new(ctx, cfg).await?;
+async fn async_run_client<C: NonBlockingClient>(ctx: Context, cfg: ClientConfig) -> io::Result<()> {
+    let mut client = C::new(ctx, cfg)?;
     info!("Client started. Sending requests...");
 
     let start = time::Instant::now();
 
+    let mut handles = Vec::new();
     let mut result = vec![0u8; REQUEST_SIZE * REQUEST_COUNT];
     for chunk in result.chunks_mut(REQUEST_SIZE) {
         // TODO: fire and forget; doesnt work with lifetime of chunk as it cant outlive its buffer
         info!("Sending");
-        client.request(chunk).await?;
+        handles.push(client.request(chunk)?);
+    }
+    for handle in handles {
+        handle.wait_async().await;
         info!("Received");
     }
 
     let duration = start.elapsed();
+
+    validate(result);
     info!(
         "{} GB/s",
         (REQUEST_COUNT * REQUEST_SIZE) as f64 / duration.as_secs_f64() / GB as f64
     );
 
     Ok(())
+}
+
+fn validate(data: Vec<u8>) {
+    thread::scope(|s| {
+        for chunk in data.chunks_exact(REQUEST_SIZE) {
+            s.spawn(move || {
+                for i in 0..chunk.len() {
+                    assert_eq!(chunk[i], i as u8);
+                }
+            });
+        }
+    });
 }

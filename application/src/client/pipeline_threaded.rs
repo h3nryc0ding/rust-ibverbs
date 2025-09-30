@@ -1,4 +1,7 @@
-use crate::client::{BaseClient, ClientConfig, NonBlockingClient, RequestHandle, RequestState};
+use crate::client::{
+    BaseClient, ClientConfig, NonBlockingClient, RequestHandle, RequestState, decode_wr_id,
+    encode_wr_id,
+};
 use crossbeam::channel;
 use crossbeam::channel::Sender;
 use dashmap::DashMap;
@@ -15,10 +18,10 @@ pub struct PipelineThreadedClient {
     reg_tx: Sender<RegistrationMessage>,
 
     config: ClientConfig,
-    workers: Vec<JoinHandle<()>>,
+    _workers: Vec<JoinHandle<()>>,
 }
 
-const CONCURRENT_REGISTRATIONS: usize = 6;
+const CONCURRENT_REGISTRATIONS: usize = 8;
 const CONCURRENT_DEREGISTRATIONS: usize = 2;
 
 impl NonBlockingClient for PipelineThreadedClient {
@@ -49,7 +52,7 @@ impl NonBlockingClient for PipelineThreadedClient {
                         remote,
                     } = msg;
                     let mr = unsafe { pd.register_raw(ptr, len).unwrap() };
-                    state.registered.fetch_add(1, Ordering::Relaxed);
+                    state.registered_acquired.fetch_add(1, Ordering::Relaxed);
                     let msg = PostMessage {
                         id,
                         chunk,
@@ -66,7 +69,6 @@ impl NonBlockingClient for PipelineThreadedClient {
 
         {
             let pending = pending.clone();
-            let post_rx = post_rx.clone();
             let handle = thread::spawn(move || {
                 while let Ok(msg) = post_rx.recv() {
                     let PostMessage {
@@ -90,7 +92,7 @@ impl NonBlockingClient for PipelineThreadedClient {
                     }
 
                     state.posted.fetch_add(1, Ordering::Relaxed);
-                    pending.insert(wr_id, (state, mr));
+                    pending.insert(wr_id, Pending { state, mr });
                 }
             });
             workers.push(handle);
@@ -105,7 +107,7 @@ impl NonBlockingClient for PipelineThreadedClient {
                     for completion in completed {
                         assert!(completion.is_valid());
                         let wr_id = completion.wr_id();
-                        if let Some((_, (state, mr))) = pending.remove(&wr_id) {
+                        if let Some((_, Pending { state, mr })) = pending.remove(&wr_id) {
                             let (id, chunk) = decode_wr_id(wr_id);
                             state.received.fetch_add(1, Ordering::Relaxed);
                             let msg = DeregistrationMessage {
@@ -129,14 +131,9 @@ impl NonBlockingClient for PipelineThreadedClient {
 
             let handle = thread::spawn(move || {
                 while let Ok(msg) = dereg_rx.recv() {
-                    let DeregistrationMessage {
-                        id,
-                        chunk,
-                        state,
-                        mr,
-                    } = msg;
+                    let DeregistrationMessage { state, mr, .. } = msg;
                     drop(mr);
-                    state.deregistered.fetch_add(1, Ordering::Relaxed);
+                    state.deregistered_copied.fetch_add(1, Ordering::Relaxed);
                 }
             });
             workers.push(handle);
@@ -147,7 +144,7 @@ impl NonBlockingClient for PipelineThreadedClient {
             remote: base.remote,
             reg_tx,
             config: base.cfg,
-            workers,
+            _workers: workers,
         })
     }
 
@@ -180,6 +177,11 @@ impl NonBlockingClient for PipelineThreadedClient {
     }
 }
 
+struct Pending {
+    state: Arc<RequestState>,
+    mr: MemoryRegion,
+}
+
 struct RegistrationMessage {
     id: usize,
     chunk: usize,
@@ -189,7 +191,6 @@ struct RegistrationMessage {
     remote: RemoteMemorySlice,
 }
 
-// SAFETY: caller needs to ensure that dst slice exists until pipeline finished
 unsafe impl Send for RegistrationMessage {}
 
 struct PostMessage {
@@ -205,14 +206,4 @@ struct DeregistrationMessage {
     chunk: usize,
     state: Arc<RequestState>,
     mr: MemoryRegion,
-}
-
-fn encode_wr_id(req_id: usize, chunk_id: usize) -> u64 {
-    ((req_id as u64) << 32) | (chunk_id as u64)
-}
-
-fn decode_wr_id(wr_id: u64) -> (usize, usize) {
-    let req_id = (wr_id >> 32) as usize;
-    let chunk_id = (wr_id & u32::MAX as u64) as usize;
-    (req_id, chunk_id)
 }

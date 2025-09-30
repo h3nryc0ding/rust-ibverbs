@@ -14,6 +14,7 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{hint, io};
+use tokio::task;
 use tracing::trace;
 
 pub use crate::client::copy::CopyClient;
@@ -94,10 +95,10 @@ impl BaseClient {
 
 #[derive(Default)]
 struct RequestState {
-    registered: AtomicUsize,
+    registered_acquired: AtomicUsize,
     posted: AtomicUsize,
     received: AtomicUsize,
-    deregistered: AtomicUsize,
+    deregistered_copied: AtomicUsize,
 }
 
 pub struct RequestHandle {
@@ -107,15 +108,15 @@ pub struct RequestHandle {
 }
 
 impl RequestHandle {
-    pub fn wait_deregistered(&self) {
-        while self.state.deregistered.load(Ordering::Relaxed) < self.chunks {
+    pub fn wait(&self) {
+        while self.state.deregistered_copied.load(Ordering::Relaxed) < self.chunks {
             hint::spin_loop();
         }
     }
 
-    pub fn wait_received(&self) {
-        while self.state.received.load(Ordering::Relaxed) < self.chunks {
-            hint::spin_loop();
+    pub async fn wait_async(&self) {
+        while self.state.deregistered_copied.load(Ordering::Relaxed) < self.chunks {
+            task::yield_now().await;
         }
     }
 }
@@ -133,4 +134,14 @@ pub trait NonBlockingClient: Sized {
 pub trait AsyncClient: Sized {
     fn new(ctx: Context, cfg: ClientConfig) -> impl Future<Output = io::Result<Self>>;
     fn request(&mut self, dst: &mut [u8]) -> impl Future<Output = io::Result<()>>;
+}
+
+fn encode_wr_id(req_id: usize, chunk_id: usize) -> u64 {
+    ((req_id as u64) << 32) | (chunk_id as u64)
+}
+
+fn decode_wr_id(wr_id: u64) -> (usize, usize) {
+    let req_id = (wr_id >> 32) as usize;
+    let chunk_id = (wr_id & u32::MAX as u64) as usize;
+    (req_id, chunk_id)
 }
