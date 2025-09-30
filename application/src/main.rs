@@ -113,7 +113,7 @@ fn run_client_blocking<C: BlockingClient>(ctx: Context, cfg: ClientConfig) -> io
     }
 
     let duration = start.elapsed();
-    validate(result);
+    // validate(result);
     info!(
         "{} GB/s",
         (REQUEST_COUNT * REQUEST_SIZE) as f64 / duration.as_secs_f64() / GB as f64

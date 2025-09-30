@@ -1,9 +1,7 @@
 use crate::{BINCODE_CONFIG, SERVER_DATA_SIZE};
 use bincode::serde::{decode_from_std_read, encode_into_std_write};
 use ibverbs::ibv_qp_type::IBV_QPT_RC;
-use ibverbs::{
-    CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair,
-};
+use ibverbs::{CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair};
 use std::io;
 use std::net::{TcpListener, TcpStream, ToSocketAddrs};
 use tracing::trace;

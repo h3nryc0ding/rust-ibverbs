@@ -2,13 +2,14 @@ use crate::client::{
     BaseClient, ClientConfig, NonBlockingClient, RequestHandle, RequestState, decode_wr_id,
     encode_wr_id,
 };
-use dashmap::DashMap;
 use ibverbs::{Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
+use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task;
 
 pub struct PipelineAsyncClient {
@@ -57,63 +58,74 @@ impl NonBlockingClient for PipelineAsyncClient {
             }
         });
 
-        let pending = Arc::new(DashMap::new());
-        {
-            let pending = pending.clone();
-            task::spawn_blocking(move || {
-                while let Some(msg) = post_rx.blocking_recv() {
-                    let PostMessage {
-                        id,
-                        chunk,
-                        state,
-                        mr,
-                        remote,
-                    } = msg;
+        task::spawn_blocking(move || {
+            let mut pending = HashMap::new();
+            let mut waiting = VecDeque::new();
+            let mut completions = [ibv_wc::default(); 16];
 
+            loop {
+                if let Some(PostMessage {
+                    id,
+                    chunk,
+                    state,
+                    mr,
+                    remote,
+                }) = waiting.pop_front()
+                {
                     let local = mr.slice_local(..);
                     let wr_id = encode_wr_id(id, chunk);
-                    'l: loop {
-                        for qp in &mut base.qps {
-                            match unsafe { qp.post_read(&[local], remote, wr_id) } {
-                                Ok(_) => break 'l,
-                                Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
-                                Err(e) => panic!("{:?}", e),
+
+                    let mut sucess = false;
+                    for qp in &mut base.qps {
+                        match unsafe { qp.post_read(&[local], remote, wr_id) } {
+                            Ok(_) => {
+                                sucess = true;
+                                break;
                             }
+                            Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
+                            Err(e) => panic!("{:?}", e),
                         }
                     }
-
-                    state.posted.fetch_add(1, Ordering::Relaxed);
-                    pending.insert(wr_id, Pending { state, mr });
-                }
-            });
-        }
-
-        {
-            let pending = pending.clone();
-            task::spawn_blocking(move || {
-                let mut completions = [ibv_wc::default(); 16];
-                loop {
-                    let completed = base.cq.poll(&mut completions).unwrap();
-                    for completion in completed {
-                        assert!(completion.is_valid());
-                        let wr_id = completion.wr_id();
-                        if let Some((_, Pending { state, mr })) = pending.remove(&wr_id) {
-                            let (id, chunk) = decode_wr_id(wr_id);
-                            state.received.fetch_sub(1, Ordering::Relaxed);
-                            let msg = DeregistrationMessage {
-                                id,
-                                chunk,
-                                state,
-                                mr,
-                            };
-                            dereg_tx.send(msg).unwrap();
-                        } else {
-                            panic!("Unknown WR ID: {wr_id}")
-                        }
+                    if sucess {
+                        state.posted.fetch_add(1, Ordering::Relaxed);
+                        pending.insert(wr_id, Pending { state, mr });
+                    } else {
+                        waiting.push_front(PostMessage {
+                            id,
+                            chunk,
+                            state,
+                            mr,
+                            remote,
+                        });
                     }
                 }
-            });
-        }
+
+                match post_rx.try_recv() {
+                    Ok(msg) => waiting.push_back(msg),
+                    Err(TryRecvError::Disconnected) => return (),
+                    Err(TryRecvError::Empty) => (),
+                }
+
+                for completion in base.cq.poll(&mut completions).unwrap() {
+                    assert!(completion.is_valid());
+                    let wr_id = completion.wr_id();
+
+                    if let Some(Pending { state, mr }) = pending.remove(&wr_id) {
+                        let (id, chunk) = decode_wr_id(wr_id);
+                        state.received.fetch_add(1, Ordering::Relaxed);
+                        let msg = DeregistrationMessage {
+                            id,
+                            chunk,
+                            state,
+                            mr,
+                        };
+                        dereg_tx.send(msg).unwrap();
+                    } else {
+                        panic!("Unknown WR ID: {wr_id}")
+                    }
+                }
+            }
+        });
 
         task::spawn(async move {
             while let Some(request) = dereg_rx.recv().await {

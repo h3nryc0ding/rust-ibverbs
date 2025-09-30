@@ -4,12 +4,11 @@ use crate::client::{
 };
 use crate::{NUMA_NODE, pin_thread_to_node};
 use crossbeam::channel;
-use crossbeam::channel::Sender;
-use dashmap::DashMap;
+use crossbeam::channel::{Sender, TryRecvError};
 use ibverbs::{Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread::JoinHandle;
 use std::{io, slice, thread};
 
 const PRE_ALLOCATIONS: usize = 64;
@@ -22,7 +21,6 @@ pub struct CopyThreadedClient {
     post_tx: Sender<PostMessage>,
 
     config: ClientConfig,
-    _worker: Vec<JoinHandle<()>>,
 }
 
 impl NonBlockingClient for CopyThreadedClient {
@@ -36,95 +34,112 @@ impl NonBlockingClient for CopyThreadedClient {
         let (post_tx, post_rx) = channel::unbounded();
         let (copy_tx, copy_rx) = channel::unbounded();
 
-        let pending = Arc::new(DashMap::new());
+        thread::spawn(move || {
+            let mut pending = HashMap::new();
+            let mut completions = [ibv_wc::default(); 16];
+            let mut outstanding = VecDeque::new();
+            let mut mrs = VecDeque::with_capacity(PRE_ALLOCATIONS);
 
-        let mut workers = Vec::new();
-        {
-            let pending = pending.clone();
-            let mr_rx = mr_rx.clone();
-            let handle = thread::spawn(move || {
-                while let Ok(mr_msg) = mr_rx.recv() {
-                    if let Ok(post_msg) = post_rx.recv() {
-                        let MRMessage { mr } = mr_msg;
-                        let PostMessage {
+            loop {
+                match mr_rx.try_recv() {
+                    Ok(MRMessage { mr }) => mrs.push_back(mr),
+                    Err(TryRecvError::Disconnected) => break,
+                    _ => {}
+                }
+                match post_rx.try_recv() {
+                    Ok(msg) => outstanding.push_back(msg),
+                    Err(TryRecvError::Disconnected) => break,
+                    _ => {}
+                }
+
+                match (mrs.pop_front(), outstanding.pop_front()) {
+                    (Some(mr), None) => mrs.push_front(mr),
+                    (None, Some(msg)) => outstanding.push_front(msg),
+                    (
+                        Some(mr),
+                        Some(PostMessage {
                             id,
                             chunk,
                             state,
                             ptr,
                             len,
                             remote,
-                        } = post_msg;
+                        }),
+                    ) => {
                         state.registered_acquired.fetch_add(1, Ordering::Relaxed);
-                        let local = mr.slice_local(..len);
+                        let local = mr.slice_local(..);
                         let wr_id = encode_wr_id(id, chunk);
-                        'l: loop {
-                            for qp in &mut base.qps {
-                                match unsafe { qp.post_read(&[local], remote, wr_id) } {
-                                    Ok(_) => break 'l,
-                                    Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
-                                    Err(e) => panic!("{:?}", e),
+
+                        let mut posted = false;
+                        for qp in &mut base.qps {
+                            match unsafe { qp.post_read(&[local], remote, wr_id) } {
+                                Ok(_) => {
+                                    posted = true;
+                                    break;
                                 }
+                                Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {}
+                                Err(e) => panic!("{:?}", e),
                             }
                         }
-
-                        state.posted.fetch_add(1, Ordering::Relaxed);
-                        pending.insert(
-                            wr_id,
-                            Pending {
-                                state,
-                                mr,
-                                ptr,
-                                len,
-                            },
-                        );
-                    }
-                }
-            });
-            workers.push(handle);
-        }
-        {
-            let pending = pending.clone();
-            let handle = thread::spawn(move || {
-                let mut completions = [ibv_wc::default(); 16];
-                loop {
-                    let completed = base.cq.poll(&mut completions).unwrap();
-                    for completion in completed {
-                        assert!(completion.is_valid());
-                        let wr_id = completion.wr_id();
-                        if let Some((
-                            _,
-                            Pending {
-                                state,
-                                mr,
-                                ptr,
-                                len,
-                            },
-                        )) = pending.remove(&wr_id)
-                        {
-                            let (id, chunk) = decode_wr_id(wr_id);
-                            state.received.fetch_add(1, Ordering::Relaxed);
-                            let msg = CopyMessage {
+                        if posted {
+                            state.posted.fetch_add(1, Ordering::Relaxed);
+                            pending.insert(
+                                wr_id,
+                                Pending {
+                                    state,
+                                    mr,
+                                    ptr,
+                                    len,
+                                },
+                            );
+                        } else {
+                            mrs.push_front(mr);
+                            outstanding.push_front(PostMessage {
                                 id,
                                 chunk,
                                 state,
-                                mr,
                                 ptr,
                                 len,
-                            };
-                            copy_tx.send(msg).unwrap()
-                        } else {
-                            panic!("Unknown WR ID: {wr_id}")
+                                remote,
+                            });
                         }
                     }
+                    _ => {}
                 }
-            });
-            workers.push(handle);
-        }
+
+                for completion in base.cq.poll(&mut completions).unwrap() {
+                    assert!(completion.is_valid());
+                    let wr_id = completion.wr_id();
+
+                    if let Some(Pending {
+                        state,
+                        mr,
+                        ptr,
+                        len,
+                    }) = pending.remove(&wr_id)
+                    {
+                        let (id, chunk) = decode_wr_id(wr_id);
+                        state.received.fetch_add(1, Ordering::Relaxed);
+                        let msg = CopyMessage {
+                            id,
+                            chunk,
+                            state,
+                            mr,
+                            ptr,
+                            len,
+                        };
+                        copy_tx.send(msg).unwrap();
+                    } else {
+                        panic!("Unknown WR ID: {wr_id}")
+                    }
+                }
+            }
+        });
 
         for _ in 0..CONCURRENT_COPIES {
             let copy_rx = copy_rx.clone();
             let mr_tx = mr_tx.clone();
-            let handle = thread::spawn(move || {
+            thread::spawn(move || {
                 pin_thread_to_node::<NUMA_NODE>().unwrap();
 
                 while let Ok(msg) = copy_rx.recv() {
@@ -144,7 +159,6 @@ impl NonBlockingClient for CopyThreadedClient {
                     mr_tx.send(msg).unwrap();
                 }
             });
-            workers.push(handle);
         }
 
         for _ in 0..PRE_ALLOCATIONS {
@@ -165,7 +179,6 @@ impl NonBlockingClient for CopyThreadedClient {
             remote: base.remote,
             post_tx,
             config: base.cfg,
-            _worker: workers,
         })
     }
 

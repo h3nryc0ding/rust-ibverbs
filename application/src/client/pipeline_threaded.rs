@@ -4,8 +4,8 @@ use crate::client::{
 };
 use crossbeam::channel;
 use crossbeam::channel::Sender;
-use dashmap::DashMap;
 use ibverbs::{Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle;
@@ -32,8 +32,6 @@ impl NonBlockingClient for PipelineThreadedClient {
         let (reg_tx, reg_rx) = channel::unbounded();
         let (post_tx, post_rx) = channel::unbounded();
         let (dereg_tx, dereg_rx) = channel::unbounded();
-
-        let pending = Arc::new(DashMap::new());
 
         let mut workers = Vec::new();
         for _ in 0..CONCURRENT_REGISTRATIONS {
@@ -67,64 +65,74 @@ impl NonBlockingClient for PipelineThreadedClient {
             workers.push(handle);
         }
 
-        {
-            let pending = pending.clone();
-            let handle = thread::spawn(move || {
-                while let Ok(msg) = post_rx.recv() {
-                    let PostMessage {
-                        id,
-                        chunk,
-                        state,
-                        mr,
-                        remote,
-                    } = msg;
+        let handle = thread::spawn(move || {
+            let mut pending = HashMap::new();
+            let mut failed = VecDeque::new();
+            let mut completions = [ibv_wc::default(); 16];
 
+            loop {
+                if let Some(PostMessage {
+                    id,
+                    chunk,
+                    state,
+                    mr,
+                    remote,
+                }) = failed.pop_front()
+                {
                     let local = mr.slice_local(..);
                     let wr_id = encode_wr_id(id, chunk);
-                    'l: loop {
-                        for qp in &mut base.qps {
-                            match unsafe { qp.post_read(&[local], remote, wr_id) } {
-                                Ok(_) => break 'l,
-                                Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
-                                Err(e) => panic!("{:?}", e),
+
+                    let mut posted = false;
+                    for qp in &mut base.qps {
+                        match unsafe { qp.post_read(&[local], remote, wr_id) } {
+                            Ok(_) => {
+                                posted = true;
+                                break;
                             }
+                            Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
+                            Err(e) => panic!("{:?}", e),
                         }
                     }
-
-                    state.posted.fetch_add(1, Ordering::Relaxed);
-                    pending.insert(wr_id, Pending { state, mr });
-                }
-            });
-            workers.push(handle);
-        }
-
-        {
-            let pending = pending.clone();
-            let handle = thread::spawn(move || {
-                let mut completions = [ibv_wc::default(); 16];
-                loop {
-                    let completed = base.cq.poll(&mut completions).unwrap();
-                    for completion in completed {
-                        assert!(completion.is_valid());
-                        let wr_id = completion.wr_id();
-                        if let Some((_, Pending { state, mr })) = pending.remove(&wr_id) {
-                            let (id, chunk) = decode_wr_id(wr_id);
-                            state.received.fetch_add(1, Ordering::Relaxed);
-                            let msg = DeregistrationMessage {
-                                id,
-                                chunk,
-                                state,
-                                mr,
-                            };
-                            dereg_tx.send(msg).unwrap()
-                        } else {
-                            panic!("Unknown WR ID: {wr_id}")
-                        }
+                    if posted {
+                        state.posted.fetch_add(1, Ordering::Relaxed);
+                        pending.insert(wr_id, Pending { state, mr });
+                    } else {
+                        failed.push_front(PostMessage {
+                            id,
+                            chunk,
+                            state,
+                            mr,
+                            remote,
+                        });
                     }
                 }
-            });
-            workers.push(handle);
-        }
+
+                match post_rx.try_recv() {
+                    Ok(msg) => failed.push_back(msg),
+                    Err(_) => (),
+                }
+
+                for completion in base.cq.poll(&mut completions).unwrap() {
+                    assert!(completion.is_valid());
+                    let wr_id = completion.wr_id();
+
+                    if let Some(Pending { state, mr }) = pending.remove(&wr_id) {
+                        let (id, chunk) = decode_wr_id(wr_id);
+                        state.received.fetch_add(1, Ordering::Relaxed);
+                        let msg = DeregistrationMessage {
+                            id,
+                            chunk,
+                            state,
+                            mr,
+                        };
+                        dereg_tx.send(msg).unwrap();
+                    } else {
+                        panic!("Unknown WR ID: {wr_id}")
+                    }
+                }
+            }
+        });
+        workers.push(handle);
 
         for _ in 0..CONCURRENT_DEREGISTRATIONS {
             let dereg_rx = dereg_rx.clone();
