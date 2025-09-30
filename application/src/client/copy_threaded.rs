@@ -12,7 +12,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{io, slice, thread};
 
 const PRE_ALLOCATIONS: usize = 64;
-const CONCURRENT_COPIES: usize = 16;
+const CONCURRENT_COPIES: usize = 8;
 
 pub struct CopyThreadedClient {
     id: AtomicUsize,
@@ -189,7 +189,6 @@ impl NonBlockingClient for CopyThreadedClient {
         let chunks: Vec<_> = dst.chunks_mut(chunk_size).collect();
 
         let handle = RequestHandle {
-            id,
             chunks: chunks.len(),
             state: Default::default(),
         };
@@ -236,6 +235,7 @@ struct PostMessage {
 
 unsafe impl Send for PostMessage {}
 
+#[allow(dead_code)]
 struct CopyMessage {
     id: usize,
     chunk: usize,

@@ -1,6 +1,5 @@
 use crate::client::{
-    BaseClient, ClientConfig, NonBlockingClient, RequestHandle, RequestState, decode_wr_id,
-    encode_wr_id,
+    AsyncClient, BaseClient, ClientConfig, RequestHandle, RequestState, decode_wr_id, encode_wr_id,
 };
 use ibverbs::{Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
@@ -21,8 +20,8 @@ pub struct PipelineAsyncClient {
     config: ClientConfig,
 }
 
-impl NonBlockingClient for PipelineAsyncClient {
-    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
+impl AsyncClient for PipelineAsyncClient {
+    async fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
         let mut base = BaseClient::new(ctx, cfg)?;
         let id = AtomicUsize::new(0);
 
@@ -145,14 +144,13 @@ impl NonBlockingClient for PipelineAsyncClient {
         })
     }
 
-    fn request(&mut self, dst: &mut [u8]) -> io::Result<RequestHandle> {
+    async fn request(&mut self, dst: &mut [u8]) -> io::Result<RequestHandle> {
         let chunk_size = self.config.mr_size;
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let chunks: Vec<_> = dst.chunks_mut(chunk_size).collect();
 
         let handle = RequestHandle {
-            id,
             chunks: chunks.len(),
             state: Default::default(),
         };
@@ -199,6 +197,7 @@ struct PostMessage {
     remote: RemoteMemorySlice,
 }
 
+#[allow(dead_code)]
 struct DeregistrationMessage {
     id: usize,
     chunk: usize,

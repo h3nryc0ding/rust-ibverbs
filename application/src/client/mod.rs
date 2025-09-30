@@ -14,7 +14,6 @@ use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{hint, io};
-use tokio::task;
 use tracing::trace;
 
 pub use crate::client::copy::CopyClient;
@@ -102,7 +101,6 @@ struct RequestState {
 }
 
 pub struct RequestHandle {
-    id: usize,
     chunks: usize,
     state: Arc<RequestState>,
 }
@@ -111,12 +109,6 @@ impl RequestHandle {
     pub fn wait(&self) {
         while self.state.deregistered_copied.load(Ordering::Relaxed) < self.chunks {
             hint::spin_loop();
-        }
-    }
-
-    pub async fn wait_async(&self) {
-        while self.state.deregistered_copied.load(Ordering::Relaxed) < self.chunks {
-            task::yield_now().await;
         }
     }
 }
@@ -133,7 +125,7 @@ pub trait NonBlockingClient: Sized {
 
 pub trait AsyncClient: Sized {
     fn new(ctx: Context, cfg: ClientConfig) -> impl Future<Output = io::Result<Self>>;
-    fn request(&mut self, dst: &mut [u8]) -> impl Future<Output = io::Result<()>>;
+    fn request(&mut self, dst: &mut [u8]) -> impl Future<Output = io::Result<RequestHandle>>;
 }
 
 fn encode_wr_id(req_id: usize, chunk_id: usize) -> u64 {

@@ -3,7 +3,7 @@ use application::client::{
     NonBlockingClient, PipelineAsyncClient, PipelineClient, PipelineThreadedClient,
 };
 use application::server::Server;
-use application::{GB, GI_B, KI_B, MI_B, client};
+use application::{GB, KI_B, MI_B, client};
 use client::ClientConfig;
 use ibverbs::Context;
 use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
@@ -113,7 +113,7 @@ fn run_client_blocking<C: BlockingClient>(ctx: Context, cfg: ClientConfig) -> io
     }
 
     let duration = start.elapsed();
-    // validate(result);
+    validate(result);
     info!(
         "{} GB/s",
         (REQUEST_COUNT * REQUEST_SIZE) as f64 / duration.as_secs_f64() / GB as f64
@@ -151,8 +151,8 @@ fn run_client_non_blocking<C: NonBlockingClient>(
     Ok(())
 }
 
-async fn async_run_client<C: NonBlockingClient>(ctx: Context, cfg: ClientConfig) -> io::Result<()> {
-    let mut client = C::new(ctx, cfg)?;
+async fn async_run_client<C: AsyncClient>(ctx: Context, cfg: ClientConfig) -> io::Result<()> {
+    let mut client = C::new(ctx, cfg).await?;
     info!("Client started. Sending requests...");
 
     let start = time::Instant::now();
@@ -160,12 +160,11 @@ async fn async_run_client<C: NonBlockingClient>(ctx: Context, cfg: ClientConfig)
     let mut handles = Vec::new();
     let mut result = vec![0u8; REQUEST_SIZE * REQUEST_COUNT];
     for chunk in result.chunks_mut(REQUEST_SIZE) {
-        // TODO: fire and forget; doesnt work with lifetime of chunk as it cant outlive its buffer
         info!("Sending");
-        handles.push(client.request(chunk)?);
+        handles.push(client.request(chunk).await?);
     }
     for handle in handles {
-        handle.wait_async().await;
+        handle.wait();
         info!("Received");
     }
 

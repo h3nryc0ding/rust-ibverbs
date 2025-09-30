@@ -163,7 +163,6 @@ impl NonBlockingClient for PipelineThreadedClient {
         let chunks: Vec<_> = dst.chunks_mut(chunk_size).collect();
 
         let handle = RequestHandle {
-            id,
             chunks: chunks.len(),
             state: Default::default(),
         };
@@ -209,6 +208,7 @@ struct PostMessage {
     remote: RemoteMemorySlice,
 }
 
+#[allow(dead_code)]
 struct DeregistrationMessage {
     id: usize,
     chunk: usize,
