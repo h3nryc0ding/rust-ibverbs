@@ -1,10 +1,11 @@
 use bincode::config::{Configuration, standard};
+use bytes::BytesMut;
 use hwlocality::Topology;
 use hwlocality::cpu::binding::CpuBindingFlags;
 use hwlocality::cpu::cpuset::CpuSet;
 use hwlocality::memory::binding::{MemoryBindingFlags, MemoryBindingPolicy};
 use hwlocality::object::depth::Depth;
-use std::io;
+use std::{io, iter};
 
 pub mod client;
 pub mod server;
@@ -46,4 +47,16 @@ fn pin_thread_to_node<const NODE: usize>() -> io::Result<()> {
         .unwrap();
 
     Ok(())
+}
+
+fn chunks_mut_exact(mut buf: BytesMut, chunk_size: usize) -> impl Iterator<Item = BytesMut> {
+    assert_eq!(buf.len() % chunk_size, 0);
+
+    iter::from_fn(move || {
+        if buf.is_empty() {
+            None
+        } else {
+            Some(buf.split_to(chunk_size))
+        }
+    })
 }

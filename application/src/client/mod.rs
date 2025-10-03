@@ -8,6 +8,7 @@ mod pipeline_threaded;
 
 use crate::BINCODE_CONFIG;
 use bincode::serde::{decode_from_std_read, encode_into_std_write};
+use bytes::BytesMut;
 use ibverbs::ibv_qp_type::IBV_QPT_RC;
 use ibverbs::{CompletionQueue, Context, ProtectionDomain, QueuePair, RemoteMemorySlice};
 use std::net::{SocketAddr, TcpStream};
@@ -115,17 +116,17 @@ impl RequestHandle {
 
 pub trait BlockingClient: Sized {
     fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self>;
-    fn request(&mut self, dst: &mut [u8]) -> io::Result<()>;
+    fn request(&mut self, bytes: BytesMut) -> io::Result<BytesMut>;
 }
 
 pub trait NonBlockingClient: Sized {
     fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self>;
-    fn request(&mut self, dst: &mut [u8]) -> io::Result<RequestHandle>;
+    fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle>;
 }
 
 pub trait AsyncClient: Sized {
     fn new(ctx: Context, cfg: ClientConfig) -> impl Future<Output = io::Result<Self>>;
-    fn request(&mut self, dst: &mut [u8]) -> impl Future<Output = io::Result<RequestHandle>>;
+    fn request(&mut self, bytes: BytesMut) -> impl Future<Output = io::Result<RequestHandle>>;
 }
 
 fn encode_wr_id(req_id: usize, chunk_id: usize) -> u64 {

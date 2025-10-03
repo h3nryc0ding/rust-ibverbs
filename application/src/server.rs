@@ -12,7 +12,7 @@ pub struct Server {
     pd: ProtectionDomain,
     cq: CompletionQueue,
     listener: TcpListener,
-    data: MemoryRegion<u8>,
+    data: MemoryRegion,
 }
 
 impl Server {
@@ -20,7 +20,7 @@ impl Server {
         let listener = TcpListener::bind(addr)?;
         let pd = ctx.alloc_pd()?;
         let cq = ctx.create_cq(1024, 0)?;
-        let mut data = pd.allocate(SERVER_DATA_SIZE)?;
+        let mut data = pd.allocate_zeroed(SERVER_DATA_SIZE)?;
         for i in 0..SERVER_DATA_SIZE {
             data[i] = i as u8;
         }

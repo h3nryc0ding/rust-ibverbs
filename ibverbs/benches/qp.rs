@@ -29,7 +29,7 @@ pub fn benchmark(c: &mut Criterion) {
         let local = pqp.endpoint().unwrap();
         pqp.handshake(local).unwrap()
     };
-    let mr = pd.allocate::<u8>(4 * GB).unwrap();
+    let mr = pd.allocate_zeroed::<u8>(4 * GB).unwrap();
     let remote = mr.slice_remote(..);
 
     let mut group = c.benchmark_group("QueuePair");
@@ -54,7 +54,7 @@ pub fn benchmark(c: &mut Criterion) {
                 || {
                     let mut mrs = Vec::with_capacity(BATCH_SIZE);
                     for _ in 0..BATCH_SIZE {
-                        mrs.push(pd.allocate::<u8>(size).unwrap());
+                        mrs.push(pd.allocate_zeroed::<u8>(size).unwrap());
                     }
                     mrs
                 },

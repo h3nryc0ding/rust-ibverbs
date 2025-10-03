@@ -1,25 +1,26 @@
 use crate::client::{BaseClient, BlockingClient, ClientConfig};
+use bytes::BytesMut;
 use ibverbs::{Context, MemoryRegion, ibv_wc};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::{hint, io};
 
-const RX_DEPTH: usize = 128;
+const PRE_ALLOCATIONS: usize = 128;
 
 pub struct IdealClient {
     base: BaseClient,
-    mrs: Vec<MemoryRegion>,
+    mrs: VecDeque<MemoryRegion>,
 }
 
 impl BlockingClient for IdealClient {
     fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
         let base = BaseClient::new(ctx, cfg)?;
 
-        let mut mrs = Vec::with_capacity(RX_DEPTH);
-        for _ in 0..RX_DEPTH {
+        let mut mrs = VecDeque::with_capacity(PRE_ALLOCATIONS);
+        for _ in 0..PRE_ALLOCATIONS {
             loop {
-                match base.pd.allocate::<u8>(base.cfg.mr_size) {
+                match base.pd.allocate_zeroed(base.cfg.mr_size) {
                     Ok(mr) => {
-                        mrs.push(mr);
+                        mrs.push_back(mr);
                         break;
                     }
                     Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
@@ -31,32 +32,31 @@ impl BlockingClient for IdealClient {
         Ok(Self { base, mrs })
     }
 
-    fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
+    fn request(&mut self, bytes: BytesMut) -> io::Result<BytesMut> {
         let mr_size = self.base.cfg.mr_size;
-        let chunks = (dst.len() + mr_size - 1) / mr_size;
-        let mut completions = vec![ibv_wc::default(); RX_DEPTH];
+        assert_eq!(bytes.len() % mr_size, 0);
 
-        let mut unused = (0..RX_DEPTH).collect::<VecDeque<usize>>();
+        let chunks = bytes.len() / mr_size;
+        let mut completions = vec![ibv_wc::default(); PRE_ALLOCATIONS];
+
+        let mut outstanding = HashMap::new();
         let mut posted = 0;
         let mut received = 0;
 
         while received < chunks {
             while posted < chunks {
-                if let Some(mr_idx) = unused.pop_front() {
-                    let mr = &self.mrs[mr_idx];
+                if let Some(mr) = self.mrs.pop_front() {
                     let local = mr.slice_local(..);
                     let remote_slice = self
                         .base
                         .remote
                         .slice(posted * mr_size..(posted + 1) * mr_size);
+                    let chunk = posted as u64;
 
                     let mut success = false;
-                    for i in 0..self.base.qps.len() {
-                        match unsafe {
-                            self.base.qps[i].post_read(&[local], remote_slice, mr_idx as u64)
-                        } {
+                    for qp in &mut self.base.qps {
+                        match unsafe { qp.post_read(&[local], remote_slice, chunk) } {
                             Ok(_) => {
-                                posted += 1;
                                 success = true;
                                 break;
                             }
@@ -67,8 +67,11 @@ impl BlockingClient for IdealClient {
                         }
                     }
                     if !success {
-                        unused.push_front(mr_idx);
+                        self.mrs.push_front(mr);
                         break;
+                    } else {
+                        outstanding.insert(posted, mr);
+                        posted += 1;
                     }
                 } else {
                     break;
@@ -76,11 +79,18 @@ impl BlockingClient for IdealClient {
             }
 
             for completion in self.base.cq.poll(&mut completions)? {
-                let mr_idx = completion.wr_id() as usize;
-                unused.push_back(mr_idx);
-                received += 1;
+                assert!(completion.is_valid());
+                let chunk = completion.wr_id() as usize;
+
+                if let Some(mr) = outstanding.remove(&chunk) {
+                    self.mrs.push_back(mr);
+                    received += 1;
+                } else {
+                    panic!("unknown completion: {completion:?}");
+                }
             }
         }
-        Ok(())
+
+        Ok(bytes)
     }
 }

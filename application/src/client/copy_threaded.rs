@@ -163,7 +163,7 @@ impl NonBlockingClient for CopyThreadedClient {
 
         for _ in 0..PRE_ALLOCATIONS {
             loop {
-                match base.pd.allocate::<u8>(base.cfg.mr_size) {
+                match base.pd.allocate_zeroed::<u8>(base.cfg.mr_size) {
                     Ok(mr) => {
                         mr_tx.send(MRMessage { mr }).unwrap();
                         break;

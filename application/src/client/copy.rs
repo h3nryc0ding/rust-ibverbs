@@ -1,24 +1,26 @@
 use crate::client::{BaseClient, BlockingClient, ClientConfig};
+use bytes::BytesMut;
 use ibverbs::{Context, MemoryRegion, ibv_wc};
+use std::collections::{HashMap, VecDeque};
 use std::{hint, io};
 
-const RX_DEPTH: usize = 128;
+const PRE_ALLOCATIONS: usize = 128;
 
 pub struct CopyClient {
     base: BaseClient,
-    mrs: Vec<MemoryRegion>,
+    mrs: VecDeque<MemoryRegion>,
 }
 
 impl BlockingClient for CopyClient {
     fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
         let base = BaseClient::new(ctx, cfg)?;
 
-        let mut mrs = Vec::with_capacity(RX_DEPTH);
-        for _ in 0..RX_DEPTH {
+        let mut mrs = VecDeque::with_capacity(PRE_ALLOCATIONS);
+        for _ in 0..PRE_ALLOCATIONS {
             loop {
-                match base.pd.allocate::<u8>(base.cfg.mr_size) {
+                match base.pd.allocate_zeroed(base.cfg.mr_size) {
                     Ok(mr) => {
-                        mrs.push(mr);
+                        mrs.push_back(mr);
                         break;
                     }
                     Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
@@ -30,34 +32,31 @@ impl BlockingClient for CopyClient {
         Ok(Self { base, mrs })
     }
 
-    fn request(&mut self, dst: &mut [u8]) -> io::Result<()> {
+    fn request(&mut self, mut bytes: BytesMut) -> io::Result<BytesMut> {
         let mr_size = self.base.cfg.mr_size;
-        let mut chunks: Vec<_> = dst.chunks_mut(mr_size).collect();
-        let mut completions = vec![ibv_wc::default(); RX_DEPTH];
+        assert_eq!(bytes.len() % mr_size, 0);
 
-        let mut unused: Vec<_> = (0..RX_DEPTH).collect();
+        let chunks = bytes.len() / mr_size;
+        let mut completions = vec![ibv_wc::default(); PRE_ALLOCATIONS];
+
+        let mut outstanding = HashMap::new();
         let mut posted = 0;
         let mut received = 0;
 
-        while received < chunks.len() {
-            while posted < chunks.len() {
-                if let Some(mr_idx) = unused.pop() {
-                    let mr = &self.mrs[mr_idx];
+        while received < chunks {
+            while posted < chunks {
+                if let Some(mr) = self.mrs.pop_front() {
                     let local = mr.slice_local(..);
-
                     let remote_slice = self
                         .base
                         .remote
                         .slice(posted * mr_size..(posted + 1) * mr_size);
-
-                    let chunk_idx = posted;
-                    let wr_id = (chunk_idx as u64) << 32 | (mr_idx as u64);
+                    let chunk = posted as u64;
 
                     let mut success = false;
                     for qp in &mut self.base.qps {
-                        match unsafe { qp.post_read(&[local], remote_slice, wr_id) } {
+                        match unsafe { qp.post_read(&[local], remote_slice, chunk) } {
                             Ok(_) => {
-                                posted += 1;
                                 success = true;
                                 break;
                             }
@@ -68,8 +67,11 @@ impl BlockingClient for CopyClient {
                         }
                     }
                     if !success {
-                        unused.push(mr_idx);
+                        self.mrs.push_front(mr);
                         break;
+                    } else {
+                        outstanding.insert(posted, mr);
+                        posted += 1;
                     }
                 } else {
                     break;
@@ -77,20 +79,22 @@ impl BlockingClient for CopyClient {
             }
 
             for completion in self.base.cq.poll(&mut completions)? {
-                let wr_id = completion.wr_id();
-                let chunk_idx = (wr_id >> 32) as usize;
-                let mr_idx = (wr_id & 0xFFFFFFFF) as usize;
+                assert!(completion.is_valid());
+                let chunk = completion.wr_id() as usize;
 
-                let mr = &self.mrs[mr_idx];
+                if let Some(mr) = outstanding.remove(&chunk) {
+                    let src_slice = mr.as_slice();
+                    let dst_slice = &mut bytes[chunk * mr_size..(chunk + 1) * mr_size];
+                    dst_slice.copy_from_slice(src_slice);
 
-                let src_slice = mr.as_slice();
-                let dest_slice = &mut chunks[chunk_idx][..];
-                dest_slice.copy_from_slice(src_slice);
-
-                unused.push(mr_idx);
-                received += 1;
+                    self.mrs.push_back(mr);
+                    received += 1;
+                } else {
+                    panic!("unknown completion: {completion:?}");
+                }
             }
         }
-        Ok(())
+
+        Ok(bytes)
     }
 }
