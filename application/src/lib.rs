@@ -49,7 +49,7 @@ fn pin_thread_to_node<const NODE: usize>() -> io::Result<()> {
     Ok(())
 }
 
-fn chunks_mut_exact(mut buf: BytesMut, chunk_size: usize) -> impl Iterator<Item = BytesMut> {
+pub fn chunks_mut_exact(mut buf: BytesMut, chunk_size: usize) -> impl Iterator<Item = BytesMut> {
     assert_eq!(buf.len() % chunk_size, 0);
 
     iter::from_fn(move || {

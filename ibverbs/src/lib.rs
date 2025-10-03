@@ -74,8 +74,7 @@ use std::os::fd::BorrowedFd;
 use std::os::raw::c_void;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{io, mem};
-use std::{ptr, slice};
+use std::{io, mem, ptr};
 
 const PORT_NUM: u8 = 1;
 
@@ -1494,6 +1493,9 @@ pub struct MemoryRegion {
     _pd: Arc<ProtectionDomainInner>,
 }
 
+unsafe impl Send for MemoryRegion {}
+unsafe impl Sync for MemoryRegion {}
+
 impl MemoryRegion {
     pub fn lkey(&self) -> u32 {
         unsafe { (*self.mr).lkey }
@@ -1519,6 +1521,7 @@ impl MemoryRegion {
                 return Err(io::Error::from_raw_os_error(errno));
             }
         };
+        mem::forget(self);
         Ok(bytes)
     }
 

@@ -9,6 +9,7 @@ mod pipeline_threaded;
 use crate::BINCODE_CONFIG;
 use bincode::serde::{decode_from_std_read, encode_into_std_write};
 use bytes::BytesMut;
+use dashmap::DashMap;
 use ibverbs::ibv_qp_type::IBV_QPT_RC;
 use ibverbs::{CompletionQueue, Context, ProtectionDomain, QueuePair, RemoteMemorySlice};
 use std::net::{SocketAddr, TcpStream};
@@ -94,23 +95,66 @@ impl BaseClient {
 }
 
 #[derive(Default)]
-struct RequestState {
+pub struct RequestProgress {
     registered_acquired: AtomicUsize,
     posted: AtomicUsize,
     received: AtomicUsize,
     deregistered_copied: AtomicUsize,
 }
 
-pub struct RequestHandle {
+pub struct RequestAggregator {
     chunks: usize,
-    state: Arc<RequestState>,
+    bytes: DashMap<usize, BytesMut>,
+}
+
+pub struct RequestCore {
+    progress: RequestProgress,
+    aggregator: RequestAggregator,
+}
+
+pub struct RequestHandle {
+    core: Arc<RequestCore>,
 }
 
 impl RequestHandle {
-    pub fn wait(&self) {
-        while self.state.deregistered_copied.load(Ordering::Relaxed) < self.chunks {
+    pub fn new(chunks: usize) -> Self {
+        Self {
+            core: Arc::new(RequestCore {
+                progress: RequestProgress::default(),
+                aggregator: RequestAggregator {
+                    chunks,
+                    bytes: DashMap::with_capacity(chunks),
+                },
+            }),
+        }
+    }
+
+    pub fn wait(self) -> io::Result<BytesMut> {
+        while self
+            .core
+            .progress
+            .deregistered_copied
+            .load(Ordering::Relaxed)
+            < self.core.aggregator.chunks
+        {
             hint::spin_loop();
         }
+        let (_, mut result) = self
+            .core
+            .aggregator
+            .bytes
+            .remove(&0)
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
+
+        for i in 1..self.core.aggregator.chunks {
+            if let Some((_, bytes)) = self.core.aggregator.bytes.remove(&i) {
+                result.unsplit(bytes);
+            } else {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+            }
+        }
+
+        Ok(result)
     }
 }
 

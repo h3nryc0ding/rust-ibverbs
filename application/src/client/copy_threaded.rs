@@ -1,22 +1,22 @@
 use crate::client::{
-    BaseClient, ClientConfig, NonBlockingClient, RequestHandle, RequestState, decode_wr_id,
+    BaseClient, ClientConfig, NonBlockingClient, RequestCore, RequestHandle, decode_wr_id,
     encode_wr_id,
 };
-use crate::{NUMA_NODE, pin_thread_to_node};
+use crate::{NUMA_NODE, chunks_mut_exact, pin_thread_to_node};
+use bytes::BytesMut;
 use crossbeam::channel;
 use crossbeam::channel::{Sender, TryRecvError};
-use ibverbs::{Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
+use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{io, slice, thread};
+use std::{hint, io, thread};
 
 const PRE_ALLOCATIONS: usize = 64;
 const CONCURRENT_COPIES: usize = 8;
 
 pub struct CopyThreadedClient {
     id: AtomicUsize,
-    remote: RemoteMemorySlice,
 
     post_tx: Sender<PostMessage>,
 
@@ -38,11 +38,11 @@ impl NonBlockingClient for CopyThreadedClient {
             let mut pending = HashMap::new();
             let mut completions = [ibv_wc::default(); 16];
             let mut outstanding = VecDeque::new();
-            let mut mrs = VecDeque::with_capacity(PRE_ALLOCATIONS);
+            let mut mrs: VecDeque<MemoryRegion> = VecDeque::with_capacity(PRE_ALLOCATIONS);
 
             loop {
                 match mr_rx.try_recv() {
-                    Ok(MRMessage { mr }) => mrs.push_back(mr),
+                    Ok(mr) => mrs.push_back(mr),
                     Err(TryRecvError::Disconnected) => break,
                     _ => {}
                 }
@@ -52,85 +52,64 @@ impl NonBlockingClient for CopyThreadedClient {
                     _ => {}
                 }
 
-                match (mrs.pop_front(), outstanding.pop_front()) {
-                    (Some(mr), None) => mrs.push_front(mr),
-                    (None, Some(msg)) => outstanding.push_front(msg),
-                    (
-                        Some(mr),
-                        Some(PostMessage {
+                if !mrs.is_empty() && !outstanding.is_empty() {
+                    let mr = mrs.pop_front().unwrap();
+                    let PostMessage {
+                        id,
+                        chunk,
+                        state,
+                        bytes,
+                    } = outstanding.pop_front().unwrap();
+
+                    let local = mr.slice_local(..);
+                    let remote = base
+                        .remote
+                        .slice(chunk * base.cfg.mr_size..(chunk + 1) * base.cfg.mr_size);
+                    let wr_id = encode_wr_id(id, chunk);
+
+                    let mut posted = false;
+                    for qp in &mut base.qps {
+                        match unsafe { qp.post_read(&[local], remote, wr_id) } {
+                            Ok(_) => {
+                                posted = true;
+                                break;
+                            }
+                            Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {
+                                hint::spin_loop();
+                            }
+                            Err(e) => panic!("{e:?}"),
+                        }
+                    }
+                    if !posted {
+                        mrs.push_front(mr);
+                        outstanding.push_front(PostMessage {
                             id,
                             chunk,
                             state,
-                            ptr,
-                            len,
-                            remote,
-                        }),
-                    ) => {
-                        state.registered_acquired.fetch_add(1, Ordering::Relaxed);
-                        let local = mr.slice_local(..);
-                        let wr_id = encode_wr_id(id, chunk);
-
-                        let mut posted = false;
-                        for qp in &mut base.qps {
-                            match unsafe { qp.post_read(&[local], remote, wr_id) } {
-                                Ok(_) => {
-                                    posted = true;
-                                    break;
-                                }
-                                Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {}
-                                Err(e) => panic!("{:?}", e),
-                            }
-                        }
-                        if posted {
-                            state.posted.fetch_add(1, Ordering::Relaxed);
-                            pending.insert(
-                                wr_id,
-                                Pending {
-                                    state,
-                                    mr,
-                                    ptr,
-                                    len,
-                                },
-                            );
-                        } else {
-                            mrs.push_front(mr);
-                            outstanding.push_front(PostMessage {
-                                id,
-                                chunk,
-                                state,
-                                ptr,
-                                len,
-                                remote,
-                            });
-                        }
+                            bytes,
+                        })
+                    } else {
+                        state.progress.posted.fetch_add(1, Ordering::Relaxed);
+                        pending.insert(wr_id, Pending { state, mr, bytes });
                     }
-                    _ => {}
                 }
 
                 for completion in base.cq.poll(&mut completions).unwrap() {
                     assert!(completion.is_valid());
                     let wr_id = completion.wr_id();
 
-                    if let Some(Pending {
-                        state,
-                        mr,
-                        ptr,
-                        len,
-                    }) = pending.remove(&wr_id)
-                    {
+                    if let Some(Pending { state, mr, bytes }) = pending.remove(&wr_id) {
                         let (id, chunk) = decode_wr_id(wr_id);
-                        state.received.fetch_add(1, Ordering::Relaxed);
-                        let msg = CopyMessage {
-                            id,
-                            chunk,
-                            state,
-                            mr,
-                            ptr,
-                            len,
-                        };
-                        copy_tx.send(msg).unwrap();
-                    } else {
-                        panic!("Unknown WR ID: {wr_id}")
+                        state.progress.received.fetch_add(1, Ordering::Relaxed);
+                        copy_tx
+                            .send(CopyMessage {
+                                id,
+                                chunk,
+                                state,
+                                mr,
+                                bytes,
+                            })
+                            .unwrap()
                     }
                 }
             }
@@ -142,33 +121,35 @@ impl NonBlockingClient for CopyThreadedClient {
             thread::spawn(move || {
                 pin_thread_to_node::<NUMA_NODE>().unwrap();
 
-                while let Ok(msg) = copy_rx.recv() {
-                    let CopyMessage {
-                        ptr,
-                        len,
-                        mr,
-                        state,
-                        ..
-                    } = msg;
-                    let src = &mr[..len];
-                    let dst = unsafe { slice::from_raw_parts_mut(ptr, len) };
-                    dst.copy_from_slice(src);
-                    state.deregistered_copied.fetch_add(1, Ordering::Relaxed);
+                while let Ok(CopyMessage {
+                    chunk,
+                    state,
+                    mr,
+                    mut bytes,
+                    ..
+                }) = copy_rx.recv()
+                {
+                    let src_slice = mr.as_slice();
+                    let dst_slice = bytes.as_mut();
+                    dst_slice.copy_from_slice(src_slice);
 
-                    let msg = MRMessage { mr };
-                    mr_tx.send(msg).unwrap();
+                    state
+                        .progress
+                        .deregistered_copied
+                        .fetch_add(1, Ordering::Relaxed);
+                    state.aggregator.bytes.insert(chunk, bytes);
+                    mr_tx.send(mr).unwrap();
                 }
             });
         }
 
         for _ in 0..PRE_ALLOCATIONS {
             loop {
-                match base.pd.allocate_zeroed::<u8>(base.cfg.mr_size) {
+                match base.pd.allocate_zeroed(base.cfg.mr_size) {
                     Ok(mr) => {
-                        mr_tx.send(MRMessage { mr }).unwrap();
+                        mr_tx.send(mr).unwrap();
                         break;
                     }
-                    Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
                     Err(e) => panic!("{:?}", e),
                 }
             }
@@ -176,32 +157,27 @@ impl NonBlockingClient for CopyThreadedClient {
 
         Ok(Self {
             id,
-            remote: base.remote,
             post_tx,
             config: base.cfg,
         })
     }
 
-    fn request(&mut self, dst: &mut [u8]) -> io::Result<RequestHandle> {
+    fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
         let chunk_size = self.config.mr_size;
+        assert_eq!(bytes.len() % chunk_size, 0);
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
-        let chunks: Vec<_> = dst.chunks_mut(chunk_size).collect();
+        let chunks: Vec<_> = chunks_mut_exact(bytes, chunk_size).collect();
 
-        let handle = RequestHandle {
-            chunks: chunks.len(),
-            state: Default::default(),
-        };
+        let handle = RequestHandle::new(chunks.len());
 
-        for (idx, chunk) in chunks.into_iter().enumerate() {
+        for (chunk, bytes) in chunks.into_iter().enumerate() {
             self.post_tx
                 .send(PostMessage {
                     id,
-                    chunk: idx,
-                    state: handle.state.clone(),
-                    ptr: chunk.as_mut_ptr(),
-                    len: chunk.len(),
-                    remote: self.remote.slice(idx * chunk_size..(idx + 1) * chunk_size),
+                    chunk,
+                    state: handle.core.clone(),
+                    bytes,
                 })
                 .unwrap()
         }
@@ -211,38 +187,23 @@ impl NonBlockingClient for CopyThreadedClient {
 }
 
 struct Pending {
-    state: Arc<RequestState>,
+    state: Arc<RequestCore>,
     mr: MemoryRegion,
-    ptr: *mut u8,
-    len: usize,
-}
-
-unsafe impl Send for Pending {}
-unsafe impl Sync for Pending {}
-
-struct MRMessage {
-    mr: MemoryRegion,
+    bytes: BytesMut,
 }
 
 struct PostMessage {
     id: usize,
     chunk: usize,
-    state: Arc<RequestState>,
-    ptr: *mut u8,
-    len: usize,
-    remote: RemoteMemorySlice,
+    state: Arc<RequestCore>,
+    bytes: BytesMut,
 }
-
-unsafe impl Send for PostMessage {}
 
 #[allow(dead_code)]
 struct CopyMessage {
     id: usize,
     chunk: usize,
-    state: Arc<RequestState>,
+    state: Arc<RequestCore>,
     mr: MemoryRegion,
-    ptr: *mut u8,
-    len: usize,
+    bytes: BytesMut,
 }
-
-unsafe impl Send for CopyMessage {}

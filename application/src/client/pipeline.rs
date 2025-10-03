@@ -3,8 +3,7 @@ use crate::client::{BaseClient, BlockingClient, ClientConfig};
 use bytes::BytesMut;
 use ibverbs::{Context, ibv_wc};
 use std::collections::{HashMap, VecDeque};
-use std::{hint, io};
-use tracing::trace;
+use std::io;
 
 pub struct PipelineClient(BaseClient);
 
@@ -26,7 +25,7 @@ impl BlockingClient for PipelineClient {
         // VecDeque<(chunk, mr)>
         let mut allocated = VecDeque::new();
         // HashMap<chunk, mr>
-        let mut outstanding = HashMap::new();
+        let mut pending = HashMap::new();
         // HashMap<chunk, mr>
         let mut received = HashMap::new();
 
@@ -39,8 +38,8 @@ impl BlockingClient for PipelineClient {
             if let Some((chunk, mr)) = allocated.pop_front() {
                 let local = mr.slice_local(..);
                 let remote = self.0.remote.slice(chunk * mr_size..(chunk + 1) * mr_size);
-                let mut posted = false;
 
+                let mut posted = false;
                 for qp in &mut self.0.qps {
                     match unsafe { qp.post_read(&[local], remote, chunk as u64) } {
                         Ok(_) => {
@@ -53,7 +52,7 @@ impl BlockingClient for PipelineClient {
                 }
 
                 if posted {
-                    outstanding.insert(chunk, mr);
+                    pending.insert(chunk, mr);
                 } else {
                     allocated.push_front((chunk, mr));
                 }
@@ -63,7 +62,7 @@ impl BlockingClient for PipelineClient {
                 assert!(completion.is_valid());
                 let chunk = completion.wr_id() as usize;
 
-                if let Some(mr) = outstanding.remove(&chunk) {
+                if let Some(mr) = pending.remove(&chunk) {
                     let bytes = mr.deregister()?;
                     received.insert(chunk, bytes);
                 } else {

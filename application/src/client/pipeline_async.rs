@@ -1,7 +1,9 @@
+use crate::chunks_mut_exact;
 use crate::client::{
-    AsyncClient, BaseClient, ClientConfig, RequestHandle, RequestState, decode_wr_id, encode_wr_id,
+    AsyncClient, BaseClient, ClientConfig, RequestCore, RequestHandle, decode_wr_id, encode_wr_id,
 };
-use ibverbs::{Context, MemoryRegion, RemoteMemorySlice, ibv_wc};
+use bytes::BytesMut;
+use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
@@ -13,7 +15,6 @@ use tokio::task;
 
 pub struct PipelineAsyncClient {
     id: AtomicUsize,
-    remote: RemoteMemorySlice,
 
     reg_tx: UnboundedSender<RegistrationMessage>,
 
@@ -31,26 +32,26 @@ impl AsyncClient for PipelineAsyncClient {
 
         let pd = Arc::new(base.pd);
         task::spawn(async move {
-            while let Some(msg) = reg_rx.recv().await {
+            while let Some(RegistrationMessage {
+                id,
+                chunk,
+                state,
+                bytes,
+            }) = reg_rx.recv().await
+            {
                 let pd = pd.clone();
                 let post_tx = post_tx.clone();
                 task::spawn_blocking(move || {
-                    let RegistrationMessage {
-                        id,
-                        chunk,
-                        ptr,
-                        len,
-                        state,
-                        remote,
-                    } = msg;
-                    let mr = unsafe { pd.register_raw(ptr as *mut u8, len).unwrap() };
-                    state.registered_acquired.fetch_add(1, Ordering::Relaxed);
+                    let mr = pd.register(bytes).unwrap();
+                    state
+                        .progress
+                        .registered_acquired
+                        .fetch_add(1, Ordering::Relaxed);
                     let msg = PostMessage {
                         id,
                         chunk,
                         state,
                         mr,
-                        remote,
                     };
                     post_tx.send(msg).unwrap();
                 });
@@ -68,50 +69,51 @@ impl AsyncClient for PipelineAsyncClient {
                     chunk,
                     state,
                     mr,
-                    remote,
                 }) = waiting.pop_front()
                 {
                     let local = mr.slice_local(..);
+                    let remote = base
+                        .remote
+                        .slice(chunk * base.cfg.mr_size..(chunk + 1) * base.cfg.mr_size);
                     let wr_id = encode_wr_id(id, chunk);
 
-                    let mut sucess = false;
+                    let mut posted = false;
                     for qp in &mut base.qps {
                         match unsafe { qp.post_read(&[local], remote, wr_id) } {
                             Ok(_) => {
-                                sucess = true;
+                                posted = true;
                                 break;
                             }
                             Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
                             Err(e) => panic!("{:?}", e),
                         }
                     }
-                    if sucess {
-                        state.posted.fetch_add(1, Ordering::Relaxed);
-                        pending.insert(wr_id, Pending { state, mr });
+                    if posted {
+                        state.progress.posted.fetch_add(1, Ordering::Relaxed);
+                        pending.insert(wr_id, (state, mr));
                     } else {
                         waiting.push_front(PostMessage {
                             id,
                             chunk,
                             state,
                             mr,
-                            remote,
                         });
                     }
                 }
 
                 match post_rx.try_recv() {
                     Ok(msg) => waiting.push_back(msg),
-                    Err(TryRecvError::Disconnected) => return (),
-                    Err(TryRecvError::Empty) => (),
+                    Err(TryRecvError::Disconnected) => return,
+                    _ => {}
                 }
 
                 for completion in base.cq.poll(&mut completions).unwrap() {
                     assert!(completion.is_valid());
                     let wr_id = completion.wr_id();
 
-                    if let Some(Pending { state, mr }) = pending.remove(&wr_id) {
+                    if let Some((state, mr)) = pending.remove(&wr_id) {
                         let (id, chunk) = decode_wr_id(wr_id);
-                        state.received.fetch_add(1, Ordering::Relaxed);
+                        state.progress.received.fetch_add(1, Ordering::Relaxed);
                         let msg = DeregistrationMessage {
                             id,
                             chunk,
@@ -129,41 +131,41 @@ impl AsyncClient for PipelineAsyncClient {
         task::spawn(async move {
             while let Some(request) = dereg_rx.recv().await {
                 task::spawn_blocking(move || {
-                    let DeregistrationMessage { state, mr, .. } = request;
-                    drop(mr);
-                    state.deregistered_copied.fetch_add(1, Ordering::Relaxed);
+                    let DeregistrationMessage {
+                        chunk, state, mr, ..
+                    } = request;
+                    let bytes = mr.deregister().unwrap();
+                    state
+                        .progress
+                        .deregistered_copied
+                        .fetch_add(1, Ordering::Relaxed);
+                    state.aggregator.bytes.insert(chunk, bytes);
                 });
             }
         });
 
         Ok(Self {
             id,
-            remote: base.remote,
             reg_tx,
             config: base.cfg,
         })
     }
 
-    async fn request(&mut self, dst: &mut [u8]) -> io::Result<RequestHandle> {
+    async fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
         let chunk_size = self.config.mr_size;
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
-        let chunks: Vec<_> = dst.chunks_mut(chunk_size).collect();
+        let chunks: Vec<_> = chunks_mut_exact(bytes, chunk_size).collect();
 
-        let handle = RequestHandle {
-            chunks: chunks.len(),
-            state: Default::default(),
-        };
+        let handle = RequestHandle::new(chunks.len());
 
-        for (idx, chunk) in chunks.into_iter().enumerate() {
+        for (chunk, bytes) in chunks.into_iter().enumerate() {
             self.reg_tx
                 .send(RegistrationMessage {
                     id,
-                    chunk: idx,
-                    state: handle.state.clone(),
-                    ptr: chunk.as_mut_ptr() as usize,
-                    len: chunk.len(),
-                    remote: self.remote.slice(idx * chunk_size..(idx + 1) * chunk_size),
+                    chunk,
+                    state: handle.core.clone(),
+                    bytes,
                 })
                 .unwrap()
         }
@@ -172,35 +174,24 @@ impl AsyncClient for PipelineAsyncClient {
     }
 }
 
-struct Pending {
-    state: Arc<RequestState>,
-    mr: MemoryRegion,
-}
-
 struct RegistrationMessage {
     id: usize,
     chunk: usize,
-    state: Arc<RequestState>,
-    // ptr: *mut u8,
-    ptr: usize, // TODO: fix the ptr type
-    len: usize,
-    remote: RemoteMemorySlice,
+    state: Arc<RequestCore>,
+    bytes: BytesMut,
 }
-
-unsafe impl Send for RegistrationMessage {}
 
 struct PostMessage {
     id: usize,
     chunk: usize,
-    state: Arc<RequestState>,
+    state: Arc<RequestCore>,
     mr: MemoryRegion,
-    remote: RemoteMemorySlice,
 }
 
-#[allow(dead_code)]
 struct DeregistrationMessage {
+    #[allow(dead_code)]
     id: usize,
     chunk: usize,
-    state: Arc<RequestState>,
+    state: Arc<RequestCore>,
     mr: MemoryRegion,
 }
