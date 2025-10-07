@@ -1,13 +1,7 @@
-mod copy;
-mod copy_async;
-mod copy_threaded;
-mod ideal;
-mod naive;
-mod naive_async;
-mod naive_threaded;
-mod pipeline;
-mod pipeline_async;
-mod pipeline_threaded;
+pub mod copy;
+pub mod ideal;
+pub mod naive;
+pub mod pipeline;
 
 use crate::BINCODE_CONFIG;
 use bincode::serde::{decode_from_std_read, encode_into_std_write};
@@ -20,17 +14,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{hint, io};
 use tracing::trace;
-
-pub use crate::client::copy::CopyClient;
-pub use crate::client::copy_async::CopyAsyncClient;
-pub use crate::client::copy_threaded::CopyThreadedClient;
-pub use crate::client::ideal::IdealClient;
-pub use crate::client::naive::NaiveClient;
-pub use crate::client::naive_async::NaiveAsyncClient;
-pub use crate::client::naive_threaded::NaiveThreadedClient;
-pub use crate::client::pipeline::PipelineClient;
-pub use crate::client::pipeline_async::PipelineAsyncClient;
-pub use crate::client::pipeline_threaded::PipelineThreadedClient;
 
 pub struct ClientConfig {
     pub server_addr: SocketAddr,

@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::{io, thread};
 
-pub struct PipelineThreadedClient {
+pub struct Client {
     id: AtomicUsize,
 
     reg_tx: Sender<RegistrationMessage>,
@@ -25,7 +25,7 @@ pub struct PipelineThreadedClient {
 const CONCURRENT_REGISTRATIONS: usize = 8;
 const CONCURRENT_DEREGISTRATIONS: usize = 2;
 
-impl NonBlockingClient for PipelineThreadedClient {
+impl NonBlockingClient for Client {
     fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
         let mut base = BaseClient::new(ctx, cfg)?;
         let id = AtomicUsize::new(0);
@@ -42,11 +42,11 @@ impl NonBlockingClient for PipelineThreadedClient {
 
             let handle = thread::spawn(move || {
                 while let Ok(RegistrationMessage {
-                    id,
-                    chunk,
-                    state,
-                    bytes,
-                }) = reg_rx.recv()
+                                 id,
+                                 chunk,
+                                 state,
+                                 bytes,
+                             }) = reg_rx.recv()
                 {
                     let mr = pd.register(bytes).unwrap();
                     state
@@ -73,11 +73,11 @@ impl NonBlockingClient for PipelineThreadedClient {
 
             loop {
                 if let Some(PostMessage {
-                    id,
-                    chunk,
-                    state,
-                    mr,
-                }) = waiting.pop_front()
+                                id,
+                                chunk,
+                                state,
+                                mr,
+                            }) = waiting.pop_front()
                 {
                     let local = mr.slice_local(..);
                     let remote = base

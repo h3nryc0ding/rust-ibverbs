@@ -1,56 +1,48 @@
-use crate::client::{BaseClient, ClientConfig, NonBlockingClient, RequestCore, RequestHandle};
+use crate::client::{AsyncClient, BaseClient, ClientConfig, RequestCore, RequestHandle};
 use bytes::BytesMut;
-use crossbeam::channel;
-use crossbeam::channel::{Sender, TryRecvError};
 use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::collections::{HashMap, VecDeque};
+use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread::JoinHandle;
-use std::{io, thread};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::task;
 
-pub struct NaiveThreadedClient {
+pub struct Client {
     id: AtomicUsize,
 
-    reg_tx: Sender<RegistrationMessage>,
-
-    _workers: Vec<JoinHandle<()>>,
+    reg_tx: UnboundedSender<RegistrationMessage>,
 }
 
-const CONCURRENT_REGISTRATIONS: usize = 8;
-const CONCURRENT_DEREGISTRATIONS: usize = 2;
-
-impl NonBlockingClient for NaiveThreadedClient {
-    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
+impl AsyncClient for Client {
+    async fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
         let mut base = BaseClient::new(ctx, cfg)?;
         let id = AtomicUsize::new(0);
 
-        let (reg_tx, reg_rx) = channel::unbounded();
-        let (post_tx, post_rx) = channel::unbounded();
-        let (dereg_tx, dereg_rx) = channel::unbounded();
+        let (reg_tx, mut reg_rx) = mpsc::unbounded_channel();
+        let (post_tx, mut post_rx) = mpsc::unbounded_channel();
+        let (dereg_tx, mut dereg_rx) = mpsc::unbounded_channel();
 
-        let mut workers = Vec::new();
-        for _ in 0..CONCURRENT_REGISTRATIONS {
-            let pd = base.pd.clone();
-            let reg_rx = reg_rx.clone();
-            let post_tx = post_tx.clone();
-
-            let handle = thread::spawn(move || {
-                while let Ok(RegistrationMessage { id, state, bytes }) = reg_rx.recv() {
+        let pd = Arc::new(base.pd);
+        task::spawn(async move {
+            while let Some(RegistrationMessage { id, state, bytes }) = reg_rx.recv().await {
+                let pd = pd.clone();
+                let post_tx = post_tx.clone();
+                task::spawn_blocking(move || {
                     let mr = pd.register(bytes).unwrap();
                     state
                         .progress
                         .registered_acquired
                         .fetch_add(1, Ordering::Relaxed);
                     let msg = PostMessage { id, state, mr };
-                    post_tx.send(msg).unwrap()
-                }
-            });
+                    post_tx.send(msg).unwrap();
+                });
+            }
+        });
 
-            workers.push(handle);
-        }
-
-        let handle = thread::spawn(move || {
+        task::spawn_blocking(move || {
             let mut pending = HashMap::new();
             let mut waiting = VecDeque::new();
             let mut completions = [ibv_wc::default(); 16];
@@ -99,33 +91,25 @@ impl NonBlockingClient for NaiveThreadedClient {
                 }
             }
         });
-        workers.push(handle);
 
-        for _ in 0..CONCURRENT_DEREGISTRATIONS {
-            let dereg_rx = dereg_rx.clone();
-
-            let handle = thread::spawn(move || {
-                while let Ok(msg) = dereg_rx.recv() {
-                    let DeregistrationMessage { state, mr, .. } = msg;
+        task::spawn(async move {
+            while let Some(request) = dereg_rx.recv().await {
+                task::spawn_blocking(move || {
+                    let DeregistrationMessage { state, mr, .. } = request;
                     let bytes = mr.deregister().unwrap();
                     state
                         .progress
                         .deregistered_copied
                         .fetch_add(1, Ordering::Relaxed);
                     state.aggregator.bytes.insert(0, bytes);
-                }
-            });
-            workers.push(handle);
-        }
+                });
+            }
+        });
 
-        Ok(Self {
-            id,
-            reg_tx,
-            _workers: workers,
-        })
+        Ok(Self { id, reg_tx })
     }
 
-    fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
+    async fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
         let id = self.id.fetch_add(1, Ordering::Relaxed);
 
         let handle = RequestHandle::new(1);

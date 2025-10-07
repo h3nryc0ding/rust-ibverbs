@@ -13,7 +13,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task;
 
-pub struct PipelineAsyncClient {
+pub struct Client {
     id: AtomicUsize,
 
     reg_tx: UnboundedSender<RegistrationMessage>,
@@ -21,7 +21,7 @@ pub struct PipelineAsyncClient {
     config: ClientConfig,
 }
 
-impl AsyncClient for PipelineAsyncClient {
+impl AsyncClient for Client {
     async fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
         let mut base = BaseClient::new(ctx, cfg)?;
         let id = AtomicUsize::new(0);
@@ -33,11 +33,11 @@ impl AsyncClient for PipelineAsyncClient {
         let pd = Arc::new(base.pd);
         task::spawn(async move {
             while let Some(RegistrationMessage {
-                id,
-                chunk,
-                state,
-                bytes,
-            }) = reg_rx.recv().await
+                               id,
+                               chunk,
+                               state,
+                               bytes,
+                           }) = reg_rx.recv().await
             {
                 let pd = pd.clone();
                 let post_tx = post_tx.clone();
@@ -65,11 +65,11 @@ impl AsyncClient for PipelineAsyncClient {
 
             loop {
                 if let Some(PostMessage {
-                    id,
-                    chunk,
-                    state,
-                    mr,
-                }) = waiting.pop_front()
+                                id,
+                                chunk,
+                                state,
+                                mr,
+                            }) = waiting.pop_front()
                 {
                     let local = mr.slice_local(..);
                     let remote = base

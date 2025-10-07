@@ -3,9 +3,9 @@ use bytes::BytesMut;
 use ibverbs::{Context, ibv_wc};
 use std::io;
 
-pub struct NaiveClient(BaseClient);
+pub struct Client(BaseClient);
 
-impl BlockingClient for NaiveClient {
+impl BlockingClient for Client {
     fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
         Ok(Self(BaseClient::new(ctx, cfg)?))
     }

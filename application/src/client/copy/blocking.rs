@@ -6,12 +6,12 @@ use std::{hint, io};
 
 const PRE_ALLOCATIONS: usize = 128;
 
-pub struct CopyClient {
+pub struct Client {
     base: BaseClient,
     mrs: VecDeque<MemoryRegion>,
 }
 
-impl BlockingClient for CopyClient {
+impl BlockingClient for Client {
     fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
         let base = BaseClient::new(ctx, cfg)?;
 

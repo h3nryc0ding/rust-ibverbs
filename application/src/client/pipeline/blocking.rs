@@ -5,9 +5,9 @@ use ibverbs::{Context, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 
-pub struct PipelineClient(BaseClient);
+pub struct Client(BaseClient);
 
-impl BlockingClient for PipelineClient {
+impl BlockingClient for Client {
     fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
         Ok(Self(BaseClient::new(ctx, cfg)?))
     }

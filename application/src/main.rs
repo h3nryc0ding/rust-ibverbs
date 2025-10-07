@@ -1,8 +1,5 @@
-use application::client::{
-    AsyncClient, BlockingClient, CopyAsyncClient, CopyClient, CopyThreadedClient, IdealClient,
-    NaiveAsyncClient, NaiveClient, NaiveThreadedClient, NonBlockingClient, PipelineAsyncClient,
-    PipelineClient, PipelineThreadedClient,
-};
+use application::client::ideal::IdealClient;
+use application::client::{AsyncClient, BlockingClient, NonBlockingClient, copy, naive, pipeline};
 use application::server::Server;
 use application::{GB, KI_B, MI_B, chunks_mut_exact, client};
 use bytes::{Bytes, BytesMut};
@@ -87,21 +84,20 @@ fn run_client(ctx: Context, server_ip: IpAddr, args: Args) -> io::Result<()> {
 
     match args.mode.unwrap() {
         Mode::Ideal => run_client_blocking::<IdealClient>(ctx, cfg),
-        Mode::Naive => run_client_blocking::<NaiveClient>(ctx, cfg),
+        Mode::Naive => run_client_blocking::<naive::blocking::Client>(ctx, cfg),
         Mode::NaiveAsync => {
-            runtime::Runtime::new()?.block_on(async_run_client::<NaiveAsyncClient>(ctx, cfg))
+            runtime::Runtime::new()?.block_on(async_run_client::<naive::r#async::Client>(ctx, cfg))
         }
-        Mode::NaiveThreaded => run_client_non_blocking::<NaiveThreadedClient>(ctx, cfg),
-        Mode::Copy => run_client_blocking::<CopyClient>(ctx, cfg),
+        Mode::NaiveThreaded => run_client_non_blocking::<naive::threaded::Client>(ctx, cfg),
+        Mode::Copy => run_client_blocking::<copy::blocking::Client>(ctx, cfg),
         Mode::CopyAsync => {
-            runtime::Runtime::new()?.block_on(async_run_client::<CopyAsyncClient>(ctx, cfg))
+            runtime::Runtime::new()?.block_on(async_run_client::<copy::r#async::Client>(ctx, cfg))
         }
-        Mode::CopyThreaded => run_client_non_blocking::<CopyThreadedClient>(ctx, cfg),
-        Mode::Pipeline => run_client_blocking::<PipelineClient>(ctx, cfg),
-        Mode::PipelineAsync => {
-            runtime::Runtime::new()?.block_on(async_run_client::<PipelineAsyncClient>(ctx, cfg))
-        }
-        Mode::PipelineThreaded => run_client_non_blocking::<PipelineThreadedClient>(ctx, cfg),
+        Mode::CopyThreaded => run_client_non_blocking::<copy::threaded::Client>(ctx, cfg),
+        Mode::Pipeline => run_client_blocking::<pipeline::blocking::Client>(ctx, cfg),
+        Mode::PipelineAsync => runtime::Runtime::new()?
+            .block_on(async_run_client::<pipeline::r#async::Client>(ctx, cfg)),
+        Mode::PipelineThreaded => run_client_non_blocking::<pipeline::threaded::Client>(ctx, cfg),
     }
 }
 

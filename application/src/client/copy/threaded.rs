@@ -1,40 +1,42 @@
 use crate::client::{
-    AsyncClient, BaseClient, ClientConfig, RequestCore, RequestHandle, decode_wr_id, encode_wr_id,
+    BaseClient, ClientConfig, NonBlockingClient, RequestCore, RequestHandle, decode_wr_id,
+    encode_wr_id,
 };
 use crate::{NUMA_NODE, chunks_mut_exact, pin_thread_to_node};
 use bytes::BytesMut;
+use crossbeam::channel;
+use crossbeam::channel::{Sender, TryRecvError};
 use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::collections::{HashMap, VecDeque};
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{hint, io};
-use tokio::sync::mpsc;
-use tokio::sync::mpsc::UnboundedSender;
-use tokio::sync::mpsc::error::TryRecvError;
-use tokio::task;
+use std::{fmt, hint, io, thread};
+use tracing::trace;
 
 const PRE_ALLOCATIONS: usize = 64;
+const CONCURRENT_COPIES: usize = 8;
 
-pub struct CopyAsyncClient {
+pub struct Client {
     id: AtomicUsize,
 
-    post_tx: UnboundedSender<PostMessage>,
+    post_tx: Sender<PostMessage>,
 
     config: ClientConfig,
 }
 
-impl AsyncClient for CopyAsyncClient {
-    async fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
+impl NonBlockingClient for Client {
+    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
         pin_thread_to_node::<NUMA_NODE>()?;
 
         let mut base = BaseClient::new(ctx, cfg)?;
         let id = AtomicUsize::new(0);
 
-        let (mr_tx, mut mr_rx) = mpsc::unbounded_channel::<MRMessage>();
-        let (post_tx, mut post_rx) = mpsc::unbounded_channel();
-        let (copy_tx, mut copy_rx) = mpsc::unbounded_channel();
+        let (mr_tx, mr_rx) = channel::unbounded::<MRMessage>();
+        let (post_tx, post_rx) = channel::unbounded();
+        let (copy_tx, copy_rx) = channel::unbounded();
 
-        task::spawn_blocking(move || {
+        thread::spawn(move || {
             let mut pending = HashMap::new();
             let mut completions = [ibv_wc::default(); 16];
             let mut outstanding = VecDeque::new();
@@ -42,12 +44,26 @@ impl AsyncClient for CopyAsyncClient {
 
             loop {
                 match mr_rx.try_recv() {
-                    Ok(msg) => mrs.push_back(msg.0),
+                    Ok(msg) => {
+                        trace!(
+                            message = debug(&msg),
+                            operation = "try_recv",
+                            channel = "mr"
+                        );
+                        mrs.push_back(msg.0)
+                    }
                     Err(TryRecvError::Disconnected) => break,
                     _ => {}
                 }
                 match post_rx.try_recv() {
-                    Ok(msg) => outstanding.push_back(msg),
+                    Ok(msg) => {
+                        trace!(
+                            message = debug(&msg),
+                            operation = "try_recv",
+                            channel = "post"
+                        );
+                        outstanding.push_back(msg)
+                    }
                     Err(TryRecvError::Disconnected) => break,
                     _ => {}
                 }
@@ -101,25 +117,29 @@ impl AsyncClient for CopyAsyncClient {
                     if let Some(Pending { state, mr, bytes }) = pending.remove(&wr_id) {
                         let (id, chunk) = decode_wr_id(wr_id);
                         state.progress.received.fetch_add(1, Ordering::Relaxed);
-                        copy_tx
-                            .send(CopyMessage {
-                                id,
-                                chunk,
-                                state,
-                                mr,
-                                bytes,
-                            })
-                            .unwrap()
+
+                        let msg = CopyMessage {
+                            id,
+                            chunk,
+                            state,
+                            mr,
+                            bytes,
+                        };
+                        trace!(message = debug(&msg), operation = "send", channel = "copy");
+                        copy_tx.send(msg).unwrap()
                     }
                 }
             }
         });
 
-        task::spawn(async move {
-            while let Some(request) = copy_rx.recv().await {
-                let mr_tx = mr_tx.clone();
-                task::spawn_blocking(move || {
-                    pin_thread_to_node::<NUMA_NODE>().unwrap();
+        for _ in 0..CONCURRENT_COPIES {
+            let copy_rx = copy_rx.clone();
+            let mr_tx = mr_tx.clone();
+            thread::spawn(move || {
+                pin_thread_to_node::<NUMA_NODE>().unwrap();
+
+                while let Ok(msg) = copy_rx.recv() {
+                    trace!(message = debug(&msg), operation = "recv", channel = "copy");
 
                     let CopyMessage {
                         chunk,
@@ -127,20 +147,35 @@ impl AsyncClient for CopyAsyncClient {
                         mr,
                         mut bytes,
                         ..
-                    } = request;
+                    } = msg;
                     let src_slice = mr.as_slice();
                     let dst_slice = bytes.as_mut();
                     dst_slice.copy_from_slice(src_slice);
+
                     state
                         .progress
                         .deregistered_copied
                         .fetch_add(1, Ordering::Relaxed);
                     state.aggregator.bytes.insert(chunk, bytes);
 
-                    mr_tx.send(MRMessage { 0: mr }).unwrap();
-                });
+                    let msg = MRMessage { 0: mr };
+                    trace!(message = debug(&msg), operation = "send", channel = "mr");
+                    mr_tx.send(msg).unwrap();
+                }
+            });
+        }
+
+        for _ in 0..PRE_ALLOCATIONS {
+            loop {
+                match base.pd.allocate_zeroed(base.cfg.mr_size) {
+                    Ok(mr) => {
+                        mr_tx.send(MRMessage { 0: mr }).unwrap();
+                        break;
+                    }
+                    Err(e) => panic!("{:?}", e),
+                }
             }
-        });
+        }
 
         Ok(Self {
             id,
@@ -149,7 +184,7 @@ impl AsyncClient for CopyAsyncClient {
         })
     }
 
-    async fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
+    fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
         let chunk_size = self.config.mr_size;
         assert_eq!(bytes.len() % chunk_size, 0);
 
@@ -159,14 +194,14 @@ impl AsyncClient for CopyAsyncClient {
         let handle = RequestHandle::new(chunks.len());
 
         for (chunk, bytes) in chunks.into_iter().enumerate() {
-            self.post_tx
-                .send(PostMessage {
-                    id,
-                    chunk,
-                    state: handle.core.clone(),
-                    bytes,
-                })
-                .unwrap()
+            let msg = PostMessage {
+                id,
+                chunk,
+                state: handle.core.clone(),
+                bytes,
+            };
+            trace!(message = debug(&msg), operation = "send", channel = "post");
+            self.post_tx.send(msg).unwrap()
         }
 
         Ok(handle)
@@ -195,4 +230,45 @@ struct CopyMessage {
     state: Arc<RequestCore>,
     mr: MemoryRegion,
     bytes: BytesMut,
+}
+
+impl Debug for MRMessage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MRMessage").field("mr", &self.0).finish()
+    }
+}
+
+impl Debug for PostMessage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PostMessage")
+            .field("id", &self.id)
+            .field("chunk", &self.chunk)
+            .field(
+                "bytes",
+                &format_args!(
+                    "BytesMut {{ ptr: {:?}, len: {:?} }}",
+                    self.bytes.as_ptr(),
+                    self.bytes.len()
+                ),
+            )
+            .finish()
+    }
+}
+
+impl Debug for CopyMessage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CopyMessage")
+            .field("id", &self.id)
+            .field("chunk", &self.chunk)
+            .field(
+                "bytes",
+                &format_args!(
+                    "BytesMut {{ ptr: {:?}, len: {:?} }}",
+                    self.bytes.as_ptr(),
+                    self.bytes.len()
+                ),
+            )
+            .field("mr", &self.mr)
+            .finish()
+    }
 }
