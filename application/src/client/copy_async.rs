@@ -1,40 +1,40 @@
 use crate::client::{
-    BaseClient, ClientConfig, NonBlockingClient, RequestCore, RequestHandle, decode_wr_id,
-    encode_wr_id,
+    AsyncClient, BaseClient, ClientConfig, RequestCore, RequestHandle, decode_wr_id, encode_wr_id,
 };
 use crate::{NUMA_NODE, chunks_mut_exact, pin_thread_to_node};
 use bytes::BytesMut;
-use crossbeam::channel;
-use crossbeam::channel::{Sender, TryRecvError};
 use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{hint, io, thread};
+use std::{hint, io};
+use tokio::sync::mpsc;
+use tokio::sync::mpsc::UnboundedSender;
+use tokio::sync::mpsc::error::TryRecvError;
+use tokio::task;
 
 const PRE_ALLOCATIONS: usize = 64;
-const CONCURRENT_COPIES: usize = 8;
 
-pub struct CopyThreadedClient {
+pub struct CopyAsyncClient {
     id: AtomicUsize,
 
-    post_tx: Sender<PostMessage>,
+    post_tx: UnboundedSender<PostMessage>,
 
     config: ClientConfig,
 }
 
-impl NonBlockingClient for CopyThreadedClient {
-    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
+impl AsyncClient for CopyAsyncClient {
+    async fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
         pin_thread_to_node::<NUMA_NODE>()?;
 
         let mut base = BaseClient::new(ctx, cfg)?;
         let id = AtomicUsize::new(0);
 
-        let (mr_tx, mr_rx) = channel::unbounded();
-        let (post_tx, post_rx) = channel::unbounded();
-        let (copy_tx, copy_rx) = channel::unbounded();
+        let (mr_tx, mut mr_rx) = mpsc::unbounded_channel();
+        let (post_tx, mut post_rx) = mpsc::unbounded_channel();
+        let (copy_tx, mut copy_rx) = mpsc::unbounded_channel();
 
-        thread::spawn(move || {
+        task::spawn_blocking(move || {
             let mut pending = HashMap::new();
             let mut completions = [ibv_wc::default(); 16];
             let mut outstanding = VecDeque::new();
@@ -115,20 +115,19 @@ impl NonBlockingClient for CopyThreadedClient {
             }
         });
 
-        for _ in 0..CONCURRENT_COPIES {
-            let copy_rx = copy_rx.clone();
-            let mr_tx = mr_tx.clone();
-            thread::spawn(move || {
-                pin_thread_to_node::<NUMA_NODE>().unwrap();
+        task::spawn(async move {
+            while let Some(request) = copy_rx.recv().await {
+                let mr_tx = mr_tx.clone();
+                task::spawn_blocking(move || {
+                    pin_thread_to_node::<NUMA_NODE>().unwrap();
 
-                while let Ok(CopyMessage {
-                    chunk,
-                    state,
-                    mr,
-                    mut bytes,
-                    ..
-                }) = copy_rx.recv()
-                {
+                    let CopyMessage {
+                        chunk,
+                        state,
+                        mr,
+                        mut bytes,
+                        ..
+                    } = request;
                     let src_slice = mr.as_slice();
                     let dst_slice = bytes.as_mut();
                     dst_slice.copy_from_slice(src_slice);
@@ -140,21 +139,9 @@ impl NonBlockingClient for CopyThreadedClient {
                     state.aggregator.bytes.insert(chunk, bytes);
 
                     mr_tx.send(mr).unwrap();
-                }
-            });
-        }
-
-        for _ in 0..PRE_ALLOCATIONS {
-            loop {
-                match base.pd.allocate_zeroed(base.cfg.mr_size) {
-                    Ok(mr) => {
-                        mr_tx.send(mr).unwrap();
-                        break;
-                    }
-                    Err(e) => panic!("{:?}", e),
-                }
+                });
             }
-        }
+        });
 
         Ok(Self {
             id,
@@ -163,7 +150,7 @@ impl NonBlockingClient for CopyThreadedClient {
         })
     }
 
-    fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
+    async fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
         let chunk_size = self.config.mr_size;
         assert_eq!(bytes.len() % chunk_size, 0);
 
