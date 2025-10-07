@@ -1,10 +1,9 @@
+use super::lib::PRE_ALLOCATIONS;
 use crate::client::{BaseClient, BlockingClient, ClientConfig};
 use bytes::BytesMut;
 use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::{hint, io};
-
-const PRE_ALLOCATIONS: usize = 128;
 
 pub struct Client {
     base: BaseClient,
@@ -40,24 +39,23 @@ impl BlockingClient for Client {
         let mut completions = vec![ibv_wc::default(); PRE_ALLOCATIONS];
 
         let mut outstanding = HashMap::new();
-        let mut posted = 0;
+        let mut chunk = 0;
         let mut received = 0;
 
         while received < chunks {
-            while posted < chunks {
+            while chunk < chunks {
                 if let Some(mr) = self.mrs.pop_front() {
                     let local = mr.slice_local(..);
                     let remote_slice = self
                         .base
                         .remote
-                        .slice(posted * mr_size..(posted + 1) * mr_size);
-                    let chunk = posted as u64;
+                        .slice(chunk * mr_size..(chunk + 1) * mr_size);
 
-                    let mut success = false;
+                    let mut posted = false;
                     for qp in &mut self.base.qps {
-                        match unsafe { qp.post_read(&[local], remote_slice, chunk) } {
+                        match unsafe { qp.post_read(&[local], remote_slice, chunk as u64) } {
                             Ok(_) => {
-                                success = true;
+                                posted = true;
                                 break;
                             }
                             Err(e) if e.kind() == io::ErrorKind::OutOfMemory => {
@@ -66,12 +64,12 @@ impl BlockingClient for Client {
                             Err(e) => return Err(e),
                         }
                     }
-                    if !success {
+                    if !posted {
                         self.mrs.push_front(mr);
                         break;
                     } else {
-                        outstanding.insert(posted, mr);
-                        posted += 1;
+                        outstanding.insert(chunk, mr);
+                        chunk += 1;
                     }
                 } else {
                     break;

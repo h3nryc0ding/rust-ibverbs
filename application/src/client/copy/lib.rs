@@ -5,6 +5,8 @@ use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 
+pub(crate) const PRE_ALLOCATIONS: usize = 64;
+
 pub(crate) struct Pending {
     pub(crate) state: Arc<RequestCore>,
     pub(crate) mr: MemoryRegion,

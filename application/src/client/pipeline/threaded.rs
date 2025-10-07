@@ -1,8 +1,7 @@
 use super::lib::{DeregistrationMessage, PostMessage, RegistrationMessage};
 use crate::chunks_mut_exact;
 use crate::client::{
-    BaseClient, ClientConfig, NonBlockingClient, RequestHandle, decode_wr_id,
-    encode_wr_id,
+    BaseClient, ClientConfig, NonBlockingClient, RequestHandle, decode_wr_id, encode_wr_id,
 };
 use bytes::BytesMut;
 use crossbeam::channel;
@@ -10,8 +9,8 @@ use crossbeam::channel::{Sender, TryRecvError};
 use ibverbs::{Context, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::thread::JoinHandle;
 use std::{io, thread};
+use tracing::trace;
 
 pub struct Client {
     id: AtomicUsize,
@@ -19,7 +18,6 @@ pub struct Client {
     reg_tx: Sender<RegistrationMessage>,
 
     config: ClientConfig,
-    _workers: Vec<JoinHandle<()>>,
 }
 
 const CONCURRENT_REGISTRATIONS: usize = 8;
@@ -34,20 +32,20 @@ impl NonBlockingClient for Client {
         let (post_tx, post_rx) = channel::unbounded();
         let (dereg_tx, dereg_rx) = channel::unbounded();
 
-        let mut workers = Vec::new();
         for _ in 0..CONCURRENT_REGISTRATIONS {
             let pd = base.pd.clone();
             let reg_rx = reg_rx.clone();
             let post_tx = post_tx.clone();
 
-            let handle = thread::spawn(move || {
-                while let Ok(RegistrationMessage {
-                    id,
-                    chunk,
-                    state,
-                    bytes,
-                }) = reg_rx.recv()
-                {
+            thread::spawn(move || {
+                while let Ok(msg) = reg_rx.recv() {
+                    trace!(message = debug(&msg), operation = "recv", channel = "reg");
+                    let RegistrationMessage {
+                        id,
+                        chunk,
+                        state,
+                        bytes,
+                    } = msg;
                     let mr = pd.register(bytes).unwrap();
                     state
                         .progress
@@ -59,14 +57,13 @@ impl NonBlockingClient for Client {
                         state,
                         mr,
                     };
+                    trace!(message = debug(&msg), operation = "send", channel = "post");
                     post_tx.send(msg).unwrap()
                 }
             });
-
-            workers.push(handle);
         }
 
-        let handle = thread::spawn(move || {
+        thread::spawn(move || {
             let mut pending = HashMap::new();
             let mut waiting = VecDeque::new();
             let mut completions = [ibv_wc::default(); 16];
@@ -110,7 +107,14 @@ impl NonBlockingClient for Client {
                 }
 
                 match post_rx.try_recv() {
-                    Ok(msg) => waiting.push_back(msg),
+                    Ok(msg) => {
+                        trace!(
+                            message = debug(&msg),
+                            operation = "try_recv",
+                            channel = "post"
+                        );
+                        waiting.push_back(msg)
+                    }
                     Err(TryRecvError::Disconnected) => return,
                     _ => {}
                 }
@@ -128,6 +132,7 @@ impl NonBlockingClient for Client {
                             state,
                             mr,
                         };
+                        trace!(message = debug(&msg), operation = "send", channel = "dereg");
                         dereg_tx.send(msg).unwrap();
                     } else {
                         panic!("Unknown WR ID: {wr_id}")
@@ -135,13 +140,13 @@ impl NonBlockingClient for Client {
                 }
             }
         });
-        workers.push(handle);
 
         for _ in 0..CONCURRENT_DEREGISTRATIONS {
             let dereg_rx = dereg_rx.clone();
 
-            let handle = thread::spawn(move || {
+            thread::spawn(move || {
                 while let Ok(msg) = dereg_rx.recv() {
+                    trace!(message = debug(&msg), operation = "recv", channel = "dereg");
                     let DeregistrationMessage {
                         chunk, state, mr, ..
                     } = msg;
@@ -153,14 +158,12 @@ impl NonBlockingClient for Client {
                     state.aggregator.bytes.insert(chunk, bytes);
                 }
             });
-            workers.push(handle);
         }
 
         Ok(Self {
             id,
             reg_tx,
             config: base.cfg,
-            _workers: workers,
         })
     }
 
@@ -174,14 +177,14 @@ impl NonBlockingClient for Client {
         let handle = RequestHandle::new(chunks.len());
 
         for (chunk, bytes) in chunks.into_iter().enumerate() {
-            self.reg_tx
-                .send(RegistrationMessage {
-                    id,
-                    chunk,
-                    state: handle.core.clone(),
-                    bytes,
-                })
-                .unwrap()
+            let msg = RegistrationMessage {
+                id,
+                chunk,
+                state: handle.core.clone(),
+                bytes,
+            };
+            trace!(message = debug(&msg), operation = "send", channel = "reg");
+            self.reg_tx.send(msg).unwrap()
         }
 
         Ok(handle)

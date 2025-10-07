@@ -1,4 +1,4 @@
-use super::lib::{CopyMessage, MRMessage, Pending, PostMessage};
+use super::lib::{CopyMessage, MRMessage, PRE_ALLOCATIONS, Pending, PostMessage};
 use crate::client::{
     AsyncClient, BaseClient, ClientConfig, RequestHandle, decode_wr_id, encode_wr_id,
 };
@@ -12,8 +12,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task;
-
-const PRE_ALLOCATIONS: usize = 64;
+use tracing::trace;
 
 pub struct Client {
     id: AtomicUsize,
@@ -34,6 +33,18 @@ impl AsyncClient for Client {
         let (post_tx, mut post_rx) = mpsc::unbounded_channel();
         let (copy_tx, mut copy_rx) = mpsc::unbounded_channel();
 
+        for _ in 0..PRE_ALLOCATIONS {
+            loop {
+                match base.pd.allocate_zeroed(base.cfg.mr_size) {
+                    Ok(mr) => {
+                        mr_tx.send(MRMessage { 0: mr }).unwrap();
+                        break;
+                    }
+                    Err(e) => panic!("{:?}", e),
+                }
+            }
+        }
+
         task::spawn_blocking(move || {
             let mut pending = HashMap::new();
             let mut completions = [ibv_wc::default(); 16];
@@ -42,12 +53,26 @@ impl AsyncClient for Client {
 
             loop {
                 match mr_rx.try_recv() {
-                    Ok(msg) => mrs.push_back(msg.0),
+                    Ok(msg) => {
+                        trace!(
+                            message = debug(&msg),
+                            operation = "try_recv",
+                            channel = "mr"
+                        );
+                        mrs.push_back(msg.0)
+                    }
                     Err(TryRecvError::Disconnected) => break,
                     _ => {}
                 }
                 match post_rx.try_recv() {
-                    Ok(msg) => outstanding.push_back(msg),
+                    Ok(msg) => {
+                        trace!(
+                            message = debug(&msg),
+                            operation = "try_recv",
+                            channel = "post"
+                        );
+                        outstanding.push_back(msg)
+                    }
                     Err(TryRecvError::Disconnected) => break,
                     _ => {}
                 }
@@ -101,23 +126,25 @@ impl AsyncClient for Client {
                     if let Some(Pending { state, mr, bytes }) = pending.remove(&wr_id) {
                         let (id, chunk) = decode_wr_id(wr_id);
                         state.progress.received.fetch_add(1, Ordering::Relaxed);
-                        copy_tx
-                            .send(CopyMessage {
-                                id,
-                                chunk,
-                                state,
-                                mr,
-                                bytes,
-                            })
-                            .unwrap()
+
+                        let msg = CopyMessage {
+                            id,
+                            chunk,
+                            state,
+                            mr,
+                            bytes,
+                        };
+                        trace!(message = debug(&msg), operation = "send", channel = "copy");
+                        copy_tx.send(msg).unwrap()
                     }
                 }
             }
         });
 
         task::spawn(async move {
-            while let Some(request) = copy_rx.recv().await {
+            while let Some(msg) = copy_rx.recv().await {
                 let mr_tx = mr_tx.clone();
+                trace!(message = debug(&msg), operation = "recv", channel = "copy");
                 task::spawn_blocking(move || {
                     pin_thread_to_node::<NUMA_NODE>().unwrap();
 
@@ -127,17 +154,20 @@ impl AsyncClient for Client {
                         mr,
                         mut bytes,
                         ..
-                    } = request;
+                    } = msg;
                     let src_slice = mr.as_slice();
                     let dst_slice = bytes.as_mut();
                     dst_slice.copy_from_slice(src_slice);
+
                     state
                         .progress
                         .deregistered_copied
                         .fetch_add(1, Ordering::Relaxed);
                     state.aggregator.bytes.insert(chunk, bytes);
 
-                    mr_tx.send(MRMessage { 0: mr }).unwrap();
+                    let msg = MRMessage { 0: mr };
+                    trace!(message = debug(&msg), operation = "send", channel = "mr");
+                    mr_tx.send(msg).unwrap();
                 });
             }
         });
@@ -159,14 +189,14 @@ impl AsyncClient for Client {
         let handle = RequestHandle::new(chunks.len());
 
         for (chunk, bytes) in chunks.into_iter().enumerate() {
-            self.post_tx
-                .send(PostMessage {
-                    id,
-                    chunk,
-                    state: handle.core.clone(),
-                    bytes,
-                })
-                .unwrap()
+            let msg = PostMessage {
+                id,
+                chunk,
+                state: handle.core.clone(),
+                bytes,
+            };
+            trace!(message = debug(&msg), operation = "send", channel = "post");
+            self.post_tx.send(msg).unwrap()
         }
 
         Ok(handle)

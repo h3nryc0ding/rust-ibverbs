@@ -10,6 +10,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task;
+use tracing::trace;
 
 pub struct Client {
     id: AtomicUsize,
@@ -28,16 +29,22 @@ impl AsyncClient for Client {
 
         let pd = Arc::new(base.pd);
         task::spawn(async move {
-            while let Some(RegistrationMessage { id, state, bytes }) = reg_rx.recv().await {
+            while let Some(msg) = reg_rx.recv().await {
                 let pd = pd.clone();
                 let post_tx = post_tx.clone();
+
                 task::spawn_blocking(move || {
+                    trace!(message = debug(&msg), operation = "recv", channel = "reg");
+                    let RegistrationMessage { id, state, bytes } = msg;
+
                     let mr = pd.register(bytes).unwrap();
                     state
                         .progress
                         .registered_acquired
                         .fetch_add(1, Ordering::Relaxed);
+
                     let msg = PostMessage { id, state, mr };
+                    trace!(message = debug(&msg), operation = "send", channel = "post");
                     post_tx.send(msg).unwrap();
                 });
             }
@@ -73,7 +80,14 @@ impl AsyncClient for Client {
                 }
 
                 match post_rx.try_recv() {
-                    Ok(msg) => waiting.push_back(msg),
+                    Ok(msg) => {
+                        trace!(
+                            message = debug(&msg),
+                            operation = "try_recv",
+                            channel = "post"
+                        );
+                        waiting.push_back(msg)
+                    }
                     Err(TryRecvError::Disconnected) => return,
                     _ => {}
                 }
@@ -84,7 +98,9 @@ impl AsyncClient for Client {
 
                     if let Some((state, mr)) = pending.remove(&id) {
                         state.progress.received.fetch_add(1, Ordering::Relaxed);
+
                         let msg = DeregistrationMessage { id, state, mr };
+                        trace!(message = debug(&msg), operation = "send", channel = "dereg");
                         dereg_tx.send(msg).unwrap();
                     } else {
                         panic!("Unknown WR ID: {id}")
@@ -94,10 +110,13 @@ impl AsyncClient for Client {
         });
 
         task::spawn(async move {
-            while let Some(request) = dereg_rx.recv().await {
+            while let Some(msg) = dereg_rx.recv().await {
                 task::spawn_blocking(move || {
-                    let DeregistrationMessage { state, mr, .. } = request;
+                    trace!(message = debug(&msg), operation = "recv", channel = "dereg");
+                    let DeregistrationMessage { state, mr, .. } = msg;
+
                     let bytes = mr.deregister().unwrap();
+
                     state
                         .progress
                         .deregistered_copied
@@ -114,13 +133,14 @@ impl AsyncClient for Client {
         let id = self.id.fetch_add(1, Ordering::Relaxed);
 
         let handle = RequestHandle::new(1);
-        self.reg_tx
-            .send(RegistrationMessage {
-                id,
-                state: handle.core.clone(),
-                bytes,
-            })
-            .unwrap();
+
+        let msg = RegistrationMessage {
+            id,
+            state: handle.core.clone(),
+            bytes,
+        };
+        trace!(message = debug(&msg), operation = "send", channel = "reg");
+        self.reg_tx.send(msg).unwrap();
 
         Ok(handle)
     }

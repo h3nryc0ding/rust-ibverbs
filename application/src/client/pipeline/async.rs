@@ -13,6 +13,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task;
+use tracing::trace;
 
 pub struct Client {
     id: AtomicUsize,
@@ -33,16 +34,17 @@ impl AsyncClient for Client {
 
         let pd = Arc::new(base.pd);
         task::spawn(async move {
-            while let Some(RegistrationMessage {
-                id,
-                chunk,
-                state,
-                bytes,
-            }) = reg_rx.recv().await
-            {
+            while let Some(msg) = reg_rx.recv().await {
                 let pd = pd.clone();
                 let post_tx = post_tx.clone();
                 task::spawn_blocking(move || {
+                    trace!(message = debug(&msg), operation = "recv", channel = "reg");
+                    let RegistrationMessage {
+                        id,
+                        chunk,
+                        state,
+                        bytes,
+                    } = msg;
                     let mr = pd.register(bytes).unwrap();
                     state
                         .progress
@@ -54,6 +56,7 @@ impl AsyncClient for Client {
                         state,
                         mr,
                     };
+                    trace!(message = debug(&msg), operation = "send", channel = "post");
                     post_tx.send(msg).unwrap();
                 });
             }
@@ -103,7 +106,14 @@ impl AsyncClient for Client {
                 }
 
                 match post_rx.try_recv() {
-                    Ok(msg) => waiting.push_back(msg),
+                    Ok(msg) => {
+                        trace!(
+                            message = debug(&msg),
+                            operation = "try_recv",
+                            channel = "post"
+                        );
+                        waiting.push_back(msg)
+                    }
                     Err(TryRecvError::Disconnected) => return,
                     _ => {}
                 }
@@ -121,6 +131,7 @@ impl AsyncClient for Client {
                             state,
                             mr,
                         };
+                        trace!(message = debug(&msg), operation = "send", channel = "dereg");
                         dereg_tx.send(msg).unwrap();
                     } else {
                         panic!("Unknown WR ID: {wr_id}")
@@ -130,11 +141,12 @@ impl AsyncClient for Client {
         });
 
         task::spawn(async move {
-            while let Some(request) = dereg_rx.recv().await {
+            while let Some(msg) = dereg_rx.recv().await {
                 task::spawn_blocking(move || {
+                    trace!(message = debug(&msg), operation = "recv", channel = "dereg");
                     let DeregistrationMessage {
                         chunk, state, mr, ..
-                    } = request;
+                    } = msg;
                     let bytes = mr.deregister().unwrap();
                     state
                         .progress
@@ -154,6 +166,7 @@ impl AsyncClient for Client {
 
     async fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
         let chunk_size = self.config.mr_size;
+        assert_eq!(bytes.len() % chunk_size, 0);
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let chunks: Vec<_> = chunks_mut_exact(bytes, chunk_size).collect();
@@ -161,14 +174,14 @@ impl AsyncClient for Client {
         let handle = RequestHandle::new(chunks.len());
 
         for (chunk, bytes) in chunks.into_iter().enumerate() {
-            self.reg_tx
-                .send(RegistrationMessage {
-                    id,
-                    chunk,
-                    state: handle.core.clone(),
-                    bytes,
-                })
-                .unwrap()
+            let msg = RegistrationMessage {
+                id,
+                chunk,
+                state: handle.core.clone(),
+                bytes,
+            };
+            trace!(message = debug(&msg), operation = "send", channel = "reg");
+            self.reg_tx.send(msg).unwrap()
         }
 
         Ok(handle)

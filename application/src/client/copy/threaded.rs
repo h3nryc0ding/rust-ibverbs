@@ -1,4 +1,4 @@
-use super::lib::{CopyMessage, MRMessage, Pending, PostMessage};
+use super::lib::{CopyMessage, MRMessage, PRE_ALLOCATIONS, Pending, PostMessage};
 use crate::client::{
     BaseClient, ClientConfig, NonBlockingClient, RequestHandle, decode_wr_id, encode_wr_id,
 };
@@ -12,7 +12,6 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{hint, io, thread};
 use tracing::trace;
 
-const PRE_ALLOCATIONS: usize = 64;
 const CONCURRENT_COPIES: usize = 8;
 
 pub struct Client {
@@ -33,6 +32,18 @@ impl NonBlockingClient for Client {
         let (mr_tx, mr_rx) = channel::unbounded::<MRMessage>();
         let (post_tx, post_rx) = channel::unbounded();
         let (copy_tx, copy_rx) = channel::unbounded();
+
+        for _ in 0..PRE_ALLOCATIONS {
+            loop {
+                match base.pd.allocate_zeroed(base.cfg.mr_size) {
+                    Ok(mr) => {
+                        mr_tx.send(MRMessage { 0: mr }).unwrap();
+                        break;
+                    }
+                    Err(e) => panic!("{:?}", e),
+                }
+            }
+        }
 
         thread::spawn(move || {
             let mut pending = HashMap::new();
@@ -161,18 +172,6 @@ impl NonBlockingClient for Client {
                     mr_tx.send(msg).unwrap();
                 }
             });
-        }
-
-        for _ in 0..PRE_ALLOCATIONS {
-            loop {
-                match base.pd.allocate_zeroed(base.cfg.mr_size) {
-                    Ok(mr) => {
-                        mr_tx.send(MRMessage { 0: mr }).unwrap();
-                        break;
-                    }
-                    Err(e) => panic!("{:?}", e),
-                }
-            }
         }
 
         Ok(Self {
