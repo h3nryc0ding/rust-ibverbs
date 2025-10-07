@@ -1,11 +1,11 @@
+use super::lib::{CopyMessage, MRMessage, Pending, PostMessage};
 use crate::client::{
-    AsyncClient, BaseClient, ClientConfig, RequestCore, RequestHandle, decode_wr_id, encode_wr_id,
+    AsyncClient, BaseClient, ClientConfig, RequestHandle, decode_wr_id, encode_wr_id,
 };
 use crate::{NUMA_NODE, chunks_mut_exact, pin_thread_to_node};
 use bytes::BytesMut;
 use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{hint, io};
 use tokio::sync::mpsc;
@@ -171,28 +171,4 @@ impl AsyncClient for Client {
 
         Ok(handle)
     }
-}
-
-struct Pending {
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
-    bytes: BytesMut,
-}
-
-struct MRMessage(MemoryRegion);
-
-struct PostMessage {
-    id: usize,
-    chunk: usize,
-    state: Arc<RequestCore>,
-    bytes: BytesMut,
-}
-
-#[allow(dead_code)]
-struct CopyMessage {
-    id: usize,
-    chunk: usize,
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
-    bytes: BytesMut,
 }

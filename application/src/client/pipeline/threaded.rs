@@ -1,14 +1,14 @@
+use super::lib::{DeregistrationMessage, PostMessage, RegistrationMessage};
 use crate::chunks_mut_exact;
 use crate::client::{
-    BaseClient, ClientConfig, NonBlockingClient, RequestCore, RequestHandle, decode_wr_id,
+    BaseClient, ClientConfig, NonBlockingClient, RequestHandle, decode_wr_id,
     encode_wr_id,
 };
 use bytes::BytesMut;
 use crossbeam::channel;
 use crossbeam::channel::{Sender, TryRecvError};
-use ibverbs::{Context, MemoryRegion, ibv_wc};
+use ibverbs::{Context, ibv_wc};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::{io, thread};
@@ -42,11 +42,11 @@ impl NonBlockingClient for Client {
 
             let handle = thread::spawn(move || {
                 while let Ok(RegistrationMessage {
-                                 id,
-                                 chunk,
-                                 state,
-                                 bytes,
-                             }) = reg_rx.recv()
+                    id,
+                    chunk,
+                    state,
+                    bytes,
+                }) = reg_rx.recv()
                 {
                     let mr = pd.register(bytes).unwrap();
                     state
@@ -73,11 +73,11 @@ impl NonBlockingClient for Client {
 
             loop {
                 if let Some(PostMessage {
-                                id,
-                                chunk,
-                                state,
-                                mr,
-                            }) = waiting.pop_front()
+                    id,
+                    chunk,
+                    state,
+                    mr,
+                }) = waiting.pop_front()
                 {
                     let local = mr.slice_local(..);
                     let remote = base
@@ -186,26 +186,4 @@ impl NonBlockingClient for Client {
 
         Ok(handle)
     }
-}
-
-struct RegistrationMessage {
-    id: usize,
-    chunk: usize,
-    state: Arc<RequestCore>,
-    bytes: BytesMut,
-}
-
-struct PostMessage {
-    id: usize,
-    chunk: usize,
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
-}
-
-struct DeregistrationMessage {
-    #[allow(dead_code)]
-    id: usize,
-    chunk: usize,
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
 }

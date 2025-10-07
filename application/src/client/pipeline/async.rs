@@ -1,9 +1,10 @@
+use super::lib::{DeregistrationMessage, PostMessage, RegistrationMessage};
 use crate::chunks_mut_exact;
 use crate::client::{
-    AsyncClient, BaseClient, ClientConfig, RequestCore, RequestHandle, decode_wr_id, encode_wr_id,
+    AsyncClient, BaseClient, ClientConfig, RequestHandle, decode_wr_id, encode_wr_id,
 };
 use bytes::BytesMut;
-use ibverbs::{Context, MemoryRegion, ibv_wc};
+use ibverbs::{Context, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
@@ -33,11 +34,11 @@ impl AsyncClient for Client {
         let pd = Arc::new(base.pd);
         task::spawn(async move {
             while let Some(RegistrationMessage {
-                               id,
-                               chunk,
-                               state,
-                               bytes,
-                           }) = reg_rx.recv().await
+                id,
+                chunk,
+                state,
+                bytes,
+            }) = reg_rx.recv().await
             {
                 let pd = pd.clone();
                 let post_tx = post_tx.clone();
@@ -65,11 +66,11 @@ impl AsyncClient for Client {
 
             loop {
                 if let Some(PostMessage {
-                                id,
-                                chunk,
-                                state,
-                                mr,
-                            }) = waiting.pop_front()
+                    id,
+                    chunk,
+                    state,
+                    mr,
+                }) = waiting.pop_front()
                 {
                     let local = mr.slice_local(..);
                     let remote = base
@@ -172,26 +173,4 @@ impl AsyncClient for Client {
 
         Ok(handle)
     }
-}
-
-struct RegistrationMessage {
-    id: usize,
-    chunk: usize,
-    state: Arc<RequestCore>,
-    bytes: BytesMut,
-}
-
-struct PostMessage {
-    id: usize,
-    chunk: usize,
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
-}
-
-struct DeregistrationMessage {
-    #[allow(dead_code)]
-    id: usize,
-    chunk: usize,
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
 }

@@ -1,6 +1,7 @@
-use crate::client::{AsyncClient, BaseClient, ClientConfig, RequestCore, RequestHandle};
+use super::lib::{DeregistrationMessage, PostMessage, RegistrationMessage};
+use crate::client::{AsyncClient, BaseClient, ClientConfig, RequestHandle};
 use bytes::BytesMut;
-use ibverbs::{Context, MemoryRegion, ibv_wc};
+use ibverbs::{Context, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
@@ -123,23 +124,4 @@ impl AsyncClient for Client {
 
         Ok(handle)
     }
-}
-
-struct RegistrationMessage {
-    id: usize,
-    state: Arc<RequestCore>,
-    bytes: BytesMut,
-}
-
-struct PostMessage {
-    id: usize,
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
-}
-
-struct DeregistrationMessage {
-    #[allow(dead_code)]
-    id: usize,
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
 }

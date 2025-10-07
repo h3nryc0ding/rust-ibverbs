@@ -1,10 +1,10 @@
-use crate::client::{BaseClient, ClientConfig, NonBlockingClient, RequestCore, RequestHandle};
+use super::lib::{DeregistrationMessage, PostMessage, RegistrationMessage};
+use crate::client::{BaseClient, ClientConfig, NonBlockingClient, RequestHandle};
 use bytes::BytesMut;
 use crossbeam::channel;
 use crossbeam::channel::{Sender, TryRecvError};
-use ibverbs::{Context, MemoryRegion, ibv_wc};
+use ibverbs::{Context, ibv_wc};
 use std::collections::{HashMap, VecDeque};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread::JoinHandle;
 use std::{io, thread};
@@ -139,23 +139,4 @@ impl NonBlockingClient for Client {
 
         Ok(handle)
     }
-}
-
-struct RegistrationMessage {
-    id: usize,
-    state: Arc<RequestCore>,
-    bytes: BytesMut,
-}
-
-struct PostMessage {
-    id: usize,
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
-}
-
-struct DeregistrationMessage {
-    #[allow(dead_code)]
-    id: usize,
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
 }

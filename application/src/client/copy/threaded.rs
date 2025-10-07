@@ -1,6 +1,6 @@
+use super::lib::{CopyMessage, MRMessage, Pending, PostMessage};
 use crate::client::{
-    BaseClient, ClientConfig, NonBlockingClient, RequestCore, RequestHandle, decode_wr_id,
-    encode_wr_id,
+    BaseClient, ClientConfig, NonBlockingClient, RequestHandle, decode_wr_id, encode_wr_id,
 };
 use crate::{NUMA_NODE, chunks_mut_exact, pin_thread_to_node};
 use bytes::BytesMut;
@@ -8,10 +8,8 @@ use crossbeam::channel;
 use crossbeam::channel::{Sender, TryRecvError};
 use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::collections::{HashMap, VecDeque};
-use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{fmt, hint, io, thread};
+use std::{hint, io, thread};
 use tracing::trace;
 
 const PRE_ALLOCATIONS: usize = 64;
@@ -205,70 +203,5 @@ impl NonBlockingClient for Client {
         }
 
         Ok(handle)
-    }
-}
-
-struct Pending {
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
-    bytes: BytesMut,
-}
-
-struct MRMessage(MemoryRegion);
-
-struct PostMessage {
-    id: usize,
-    chunk: usize,
-    state: Arc<RequestCore>,
-    bytes: BytesMut,
-}
-
-#[allow(dead_code)]
-struct CopyMessage {
-    id: usize,
-    chunk: usize,
-    state: Arc<RequestCore>,
-    mr: MemoryRegion,
-    bytes: BytesMut,
-}
-
-impl Debug for MRMessage {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("MRMessage").field("mr", &self.0).finish()
-    }
-}
-
-impl Debug for PostMessage {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("PostMessage")
-            .field("id", &self.id)
-            .field("chunk", &self.chunk)
-            .field(
-                "bytes",
-                &format_args!(
-                    "BytesMut {{ ptr: {:?}, len: {:?} }}",
-                    self.bytes.as_ptr(),
-                    self.bytes.len()
-                ),
-            )
-            .finish()
-    }
-}
-
-impl Debug for CopyMessage {
-    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CopyMessage")
-            .field("id", &self.id)
-            .field("chunk", &self.chunk)
-            .field(
-                "bytes",
-                &format_args!(
-                    "BytesMut {{ ptr: {:?}, len: {:?} }}",
-                    self.bytes.as_ptr(),
-                    self.bytes.len()
-                ),
-            )
-            .field("mr", &self.mr)
-            .finish()
     }
 }
