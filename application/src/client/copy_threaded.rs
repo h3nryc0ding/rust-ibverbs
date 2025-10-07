@@ -8,9 +8,11 @@ use crossbeam::channel;
 use crossbeam::channel::{Sender, TryRecvError};
 use ibverbs::{Context, MemoryRegion, ibv_wc};
 use std::collections::{HashMap, VecDeque};
+use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::{hint, io, thread};
+use std::{fmt, hint, io, thread};
+use tracing::trace;
 
 const PRE_ALLOCATIONS: usize = 64;
 const CONCURRENT_COPIES: usize = 8;
@@ -30,7 +32,7 @@ impl NonBlockingClient for CopyThreadedClient {
         let mut base = BaseClient::new(ctx, cfg)?;
         let id = AtomicUsize::new(0);
 
-        let (mr_tx, mr_rx) = channel::unbounded();
+        let (mr_tx, mr_rx) = channel::unbounded::<MRMessage>();
         let (post_tx, post_rx) = channel::unbounded();
         let (copy_tx, copy_rx) = channel::unbounded();
 
@@ -42,12 +44,26 @@ impl NonBlockingClient for CopyThreadedClient {
 
             loop {
                 match mr_rx.try_recv() {
-                    Ok(mr) => mrs.push_back(mr),
+                    Ok(msg) => {
+                        trace!(
+                            message = debug(&msg),
+                            operation = "try_recv",
+                            channel = "mr"
+                        );
+                        mrs.push_back(msg.0)
+                    }
                     Err(TryRecvError::Disconnected) => break,
                     _ => {}
                 }
                 match post_rx.try_recv() {
-                    Ok(msg) => outstanding.push_back(msg),
+                    Ok(msg) => {
+                        trace!(
+                            message = debug(&msg),
+                            operation = "try_recv",
+                            channel = "post"
+                        );
+                        outstanding.push_back(msg)
+                    }
                     Err(TryRecvError::Disconnected) => break,
                     _ => {}
                 }
@@ -101,15 +117,16 @@ impl NonBlockingClient for CopyThreadedClient {
                     if let Some(Pending { state, mr, bytes }) = pending.remove(&wr_id) {
                         let (id, chunk) = decode_wr_id(wr_id);
                         state.progress.received.fetch_add(1, Ordering::Relaxed);
-                        copy_tx
-                            .send(CopyMessage {
-                                id,
-                                chunk,
-                                state,
-                                mr,
-                                bytes,
-                            })
-                            .unwrap()
+
+                        let msg = CopyMessage {
+                            id,
+                            chunk,
+                            state,
+                            mr,
+                            bytes,
+                        };
+                        trace!(message = debug(&msg), operation = "send", channel = "copy");
+                        copy_tx.send(msg).unwrap()
                     }
                 }
             }
@@ -121,14 +138,16 @@ impl NonBlockingClient for CopyThreadedClient {
             thread::spawn(move || {
                 pin_thread_to_node::<NUMA_NODE>().unwrap();
 
-                while let Ok(CopyMessage {
-                    chunk,
-                    state,
-                    mr,
-                    mut bytes,
-                    ..
-                }) = copy_rx.recv()
-                {
+                while let Ok(msg) = copy_rx.recv() {
+                    trace!(message = debug(&msg), operation = "recv", channel = "copy");
+
+                    let CopyMessage {
+                        chunk,
+                        state,
+                        mr,
+                        mut bytes,
+                        ..
+                    } = msg;
                     let src_slice = mr.as_slice();
                     let dst_slice = bytes.as_mut();
                     dst_slice.copy_from_slice(src_slice);
@@ -139,7 +158,9 @@ impl NonBlockingClient for CopyThreadedClient {
                         .fetch_add(1, Ordering::Relaxed);
                     state.aggregator.bytes.insert(chunk, bytes);
 
-                    mr_tx.send(mr).unwrap();
+                    let msg = MRMessage { 0: mr };
+                    trace!(message = debug(&msg), operation = "send", channel = "mr");
+                    mr_tx.send(msg).unwrap();
                 }
             });
         }
@@ -148,7 +169,7 @@ impl NonBlockingClient for CopyThreadedClient {
             loop {
                 match base.pd.allocate_zeroed(base.cfg.mr_size) {
                     Ok(mr) => {
-                        mr_tx.send(mr).unwrap();
+                        mr_tx.send(MRMessage { 0: mr }).unwrap();
                         break;
                     }
                     Err(e) => panic!("{:?}", e),
@@ -173,14 +194,14 @@ impl NonBlockingClient for CopyThreadedClient {
         let handle = RequestHandle::new(chunks.len());
 
         for (chunk, bytes) in chunks.into_iter().enumerate() {
-            self.post_tx
-                .send(PostMessage {
-                    id,
-                    chunk,
-                    state: handle.core.clone(),
-                    bytes,
-                })
-                .unwrap()
+            let msg = PostMessage {
+                id,
+                chunk,
+                state: handle.core.clone(),
+                bytes,
+            };
+            trace!(message = debug(&msg), operation = "send", channel = "post");
+            self.post_tx.send(msg).unwrap()
         }
 
         Ok(handle)
@@ -192,6 +213,8 @@ struct Pending {
     mr: MemoryRegion,
     bytes: BytesMut,
 }
+
+struct MRMessage(MemoryRegion);
 
 struct PostMessage {
     id: usize,
@@ -207,4 +230,45 @@ struct CopyMessage {
     state: Arc<RequestCore>,
     mr: MemoryRegion,
     bytes: BytesMut,
+}
+
+impl Debug for MRMessage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MRMessage").field("mr", &self.0).finish()
+    }
+}
+
+impl Debug for PostMessage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PostMessage")
+            .field("id", &self.id)
+            .field("chunk", &self.chunk)
+            .field(
+                "bytes",
+                &format_args!(
+                    "BytesMut {{ ptr: {:?}, len: {:?} }}",
+                    self.bytes.as_ptr(),
+                    self.bytes.len()
+                ),
+            )
+            .finish()
+    }
+}
+
+impl Debug for CopyMessage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("CopyMessage")
+            .field("id", &self.id)
+            .field("chunk", &self.chunk)
+            .field(
+                "bytes",
+                &format_args!(
+                    "BytesMut {{ ptr: {:?}, len: {:?} }}",
+                    self.bytes.as_ptr(),
+                    self.bytes.len()
+                ),
+            )
+            .field("mr", &self.mr)
+            .finish()
+    }
 }

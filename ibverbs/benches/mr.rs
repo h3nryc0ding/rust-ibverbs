@@ -33,11 +33,7 @@ pub fn benchmark(c: &mut Criterion) {
         2 * GB,
     ] {
         group.bench_function(format!("{} KB register", size / KB), |b| {
-            b.iter_batched(
-                || &pd,
-                |pd| pd.allocate_zeroed(size).unwrap(),
-                PerIteration,
-            )
+            b.iter_batched(|| &pd, |pd| pd.allocate_zeroed(size).unwrap(), PerIteration)
         });
         group.bench_function(format!("{} KB deregister", size / KB), |b| {
             b.iter_batched(

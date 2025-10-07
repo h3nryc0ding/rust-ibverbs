@@ -106,10 +106,7 @@ impl AsyncClient for NaiveAsyncClient {
             }
         });
 
-        Ok(Self {
-            id,
-            reg_tx,
-        })
+        Ok(Self { id, reg_tx })
     }
 
     async fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {

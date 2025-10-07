@@ -67,14 +67,14 @@
 use bytes::BytesMut;
 use std::convert::TryInto;
 use std::ffi::CStr;
-use std::fmt::Debug;
+use std::fmt::{Debug, Formatter};
 use std::mem::ManuallyDrop;
 use std::ops::{Bound, Deref, DerefMut, RangeBounds};
 use std::os::fd::BorrowedFd;
 use std::os::raw::c_void;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{io, mem, ptr};
+use std::{fmt, io, mem, ptr};
 
 const PORT_NUM: u8 = 1;
 
@@ -1599,6 +1599,17 @@ impl Drop for MemoryRegion {
                 panic!("dereg_mr failed: {}", io::Error::from_raw_os_error(errno));
             }
         }
+    }
+}
+
+impl Debug for MemoryRegion {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        f.debug_struct("MemoryRegion")
+            .field("addr", &self.as_ptr())
+            .field("length", &self.len())
+            .field("lkey", &self.lkey())
+            .field("rkey", &self.rkey())
+            .finish()
     }
 }
 

@@ -30,7 +30,7 @@ impl AsyncClient for CopyAsyncClient {
         let mut base = BaseClient::new(ctx, cfg)?;
         let id = AtomicUsize::new(0);
 
-        let (mr_tx, mut mr_rx) = mpsc::unbounded_channel();
+        let (mr_tx, mut mr_rx) = mpsc::unbounded_channel::<MRMessage>();
         let (post_tx, mut post_rx) = mpsc::unbounded_channel();
         let (copy_tx, mut copy_rx) = mpsc::unbounded_channel();
 
@@ -42,7 +42,7 @@ impl AsyncClient for CopyAsyncClient {
 
             loop {
                 match mr_rx.try_recv() {
-                    Ok(mr) => mrs.push_back(mr),
+                    Ok(msg) => mrs.push_back(msg.0),
                     Err(TryRecvError::Disconnected) => break,
                     _ => {}
                 }
@@ -131,14 +131,13 @@ impl AsyncClient for CopyAsyncClient {
                     let src_slice = mr.as_slice();
                     let dst_slice = bytes.as_mut();
                     dst_slice.copy_from_slice(src_slice);
-
                     state
                         .progress
                         .deregistered_copied
                         .fetch_add(1, Ordering::Relaxed);
                     state.aggregator.bytes.insert(chunk, bytes);
 
-                    mr_tx.send(mr).unwrap();
+                    mr_tx.send(MRMessage { 0: mr }).unwrap();
                 });
             }
         });
@@ -179,6 +178,8 @@ struct Pending {
     mr: MemoryRegion,
     bytes: BytesMut,
 }
+
+struct MRMessage(MemoryRegion);
 
 struct PostMessage {
     id: usize,
