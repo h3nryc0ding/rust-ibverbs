@@ -54,11 +54,7 @@ impl NonBlockingClient for Client {
             loop {
                 match mr_rx.try_recv() {
                     Ok(msg) => {
-                        trace!(
-                            message = debug(&msg),
-                            operation = "try_recv",
-                            channel = "mr"
-                        );
+                        trace!(message = ?msg,operation = "try_recv",channel = "mr");
                         mrs.push_back(msg.0)
                     }
                     Err(TryRecvError::Disconnected) => break,
@@ -66,11 +62,7 @@ impl NonBlockingClient for Client {
                 }
                 match post_rx.try_recv() {
                     Ok(msg) => {
-                        trace!(
-                            message = debug(&msg),
-                            operation = "try_recv",
-                            channel = "post"
-                        );
+                        trace!(message = ?msg,operation = "try_recv",channel = "post");
                         outstanding.push_back(msg)
                     }
                     Err(TryRecvError::Disconnected) => break,
@@ -134,7 +126,7 @@ impl NonBlockingClient for Client {
                             mr,
                             bytes,
                         };
-                        trace!(message = debug(&msg), operation = "send", channel = "copy");
+                        trace!(message = ?msg, operation = "send", channel = "copy");
                         copy_tx.send(msg).unwrap()
                     }
                 }
@@ -148,7 +140,7 @@ impl NonBlockingClient for Client {
                 pin_thread_to_node::<NUMA_NODE>().unwrap();
 
                 while let Ok(msg) = copy_rx.recv() {
-                    trace!(message = debug(&msg), operation = "recv", channel = "copy");
+                    trace!(message = ?msg, operation = "recv", channel = "copy");
 
                     let CopyMessage {
                         chunk,
@@ -168,7 +160,7 @@ impl NonBlockingClient for Client {
                     state.aggregator.bytes.insert(chunk, bytes);
 
                     let msg = MRMessage { 0: mr };
-                    trace!(message = debug(&msg), operation = "send", channel = "mr");
+                    trace!(message = ?msg, operation = "send", channel = "mr");
                     mr_tx.send(msg).unwrap();
                 }
             });
@@ -197,7 +189,7 @@ impl NonBlockingClient for Client {
                 state: handle.core.clone(),
                 bytes,
             };
-            trace!(message = debug(&msg), operation = "send", channel = "post");
+            trace!(message = ?msg, operation = "send", channel = "post");
             self.post_tx.send(msg).unwrap()
         }
 

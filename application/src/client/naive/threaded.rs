@@ -34,7 +34,7 @@ impl NonBlockingClient for Client {
 
             thread::spawn(move || {
                 while let Ok(msg) = reg_rx.recv() {
-                    trace!(message = debug(&msg), operation = "recv", channel = "reg");
+                    trace!(message = ?msg, operation = "recv", channel = "reg");
                     let RegistrationMessage { id, state, bytes } = msg;
 
                     let mr = pd.register(bytes).unwrap();
@@ -44,7 +44,7 @@ impl NonBlockingClient for Client {
                         .fetch_add(1, Ordering::Relaxed);
 
                     let msg = PostMessage { id, state, mr };
-                    trace!(message = debug(&msg), operation = "send", channel = "post");
+                    trace!(message = ?msg, operation = "send", channel = "post");
                     post_tx.send(msg).unwrap()
                 }
             });
@@ -81,11 +81,7 @@ impl NonBlockingClient for Client {
 
                 match post_rx.try_recv() {
                     Ok(msg) => {
-                        trace!(
-                            message = debug(&msg),
-                            operation = "try_recv",
-                            channel = "post"
-                        );
+                        trace!(message = ?msg,operation = "try_recv",channel = "post");
                         waiting.push_back(msg)
                     }
                     Err(TryRecvError::Disconnected) => return,
@@ -100,7 +96,7 @@ impl NonBlockingClient for Client {
                         state.progress.received.fetch_add(1, Ordering::Relaxed);
 
                         let msg = DeregistrationMessage { id, state, mr };
-                        trace!(message = debug(&msg), operation = "send", channel = "dereg");
+                        trace!(message = ?msg, operation = "send", channel = "dereg");
                         dereg_tx.send(msg).unwrap();
                     } else {
                         panic!("Unknown WR ID: {id}")
@@ -114,7 +110,7 @@ impl NonBlockingClient for Client {
 
             thread::spawn(move || {
                 while let Ok(msg) = dereg_rx.recv() {
-                    trace!(message = debug(&msg), operation = "recv", channel = "dereg");
+                    trace!(message = ?msg, operation = "recv", channel = "dereg");
                     let DeregistrationMessage { state, mr, .. } = msg;
 
                     let bytes = mr.deregister().unwrap();
@@ -141,7 +137,7 @@ impl NonBlockingClient for Client {
             state: handle.core.clone(),
             bytes,
         };
-        trace!(message = debug(&msg), operation = "send", channel = "reg");
+        trace!(message = ?msg, operation = "send", channel = "reg");
         self.reg_tx.send(msg).unwrap();
 
         Ok(handle)

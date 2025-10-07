@@ -1,4 +1,4 @@
 pub mod r#async;
 pub mod blocking;
-pub mod threaded;
 mod lib;
+pub mod threaded;

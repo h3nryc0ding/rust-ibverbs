@@ -38,7 +38,7 @@ impl AsyncClient for Client {
                 let pd = pd.clone();
                 let post_tx = post_tx.clone();
                 task::spawn_blocking(move || {
-                    trace!(message = debug(&msg), operation = "recv", channel = "reg");
+                    trace!(message = ?msg, operation = "recv", channel = "reg");
                     let RegistrationMessage {
                         id,
                         chunk,
@@ -56,7 +56,7 @@ impl AsyncClient for Client {
                         state,
                         mr,
                     };
-                    trace!(message = debug(&msg), operation = "send", channel = "post");
+                    trace!(message = ?msg, operation = "send", channel = "post");
                     post_tx.send(msg).unwrap();
                 });
             }
@@ -107,11 +107,7 @@ impl AsyncClient for Client {
 
                 match post_rx.try_recv() {
                     Ok(msg) => {
-                        trace!(
-                            message = debug(&msg),
-                            operation = "try_recv",
-                            channel = "post"
-                        );
+                        trace!(message = ?msg,operation = "try_recv",channel = "post");
                         waiting.push_back(msg)
                     }
                     Err(TryRecvError::Disconnected) => return,
@@ -131,7 +127,7 @@ impl AsyncClient for Client {
                             state,
                             mr,
                         };
-                        trace!(message = debug(&msg), operation = "send", channel = "dereg");
+                        trace!(message = ?msg, operation = "send", channel = "dereg");
                         dereg_tx.send(msg).unwrap();
                     } else {
                         panic!("Unknown WR ID: {wr_id}")
@@ -143,7 +139,7 @@ impl AsyncClient for Client {
         task::spawn(async move {
             while let Some(msg) = dereg_rx.recv().await {
                 task::spawn_blocking(move || {
-                    trace!(message = debug(&msg), operation = "recv", channel = "dereg");
+                    trace!(message = ?msg, operation = "recv", channel = "dereg");
                     let DeregistrationMessage {
                         chunk, state, mr, ..
                     } = msg;
@@ -180,7 +176,7 @@ impl AsyncClient for Client {
                 state: handle.core.clone(),
                 bytes,
             };
-            trace!(message = debug(&msg), operation = "send", channel = "reg");
+            trace!(message = ?msg, operation = "send", channel = "reg");
             self.reg_tx.send(msg).unwrap()
         }
 
