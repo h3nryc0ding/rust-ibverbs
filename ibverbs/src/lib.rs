@@ -1688,7 +1688,7 @@ impl RemoteMemorySlice {
         self.rkey
     }
 
-    pub fn slice(self, bounds: impl RangeBounds<usize>) -> Self {
+    pub fn slice(&self, bounds: impl RangeBounds<usize>) -> Self {
         let start = match bounds.start_bound() {
             Bound::Included(&n) => n,
             Bound::Excluded(&n) => n + 1,

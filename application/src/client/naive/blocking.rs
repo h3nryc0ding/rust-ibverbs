@@ -14,12 +14,12 @@ impl Client {
 }
 
 impl BlockingClient for Client {
-    fn fetch(&mut self, bytes: BytesMut, remote: RemoteMemorySlice) -> io::Result<BytesMut> {
+    fn fetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
 
         let mr = self.base.pd.register(bytes)?;
         let local = mr.slice_local(..).collect::<Vec<_>>();
-        unsafe { self.base.qps[0].post_read(&local, remote, 0)? };
+        unsafe { self.base.qps[0].post_read(&local, remote.slice(..), 0)? };
 
         let mut completed = false;
         let mut completions = [ibv_wc::default(); 1];

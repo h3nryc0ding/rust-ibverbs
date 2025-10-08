@@ -1,4 +1,4 @@
-use application::args::{latency_blocking, throughput_blocking, validate_blocking};
+use application::args::bench_blocking;
 use application::client::BaseClient;
 use application::client::copy::blocking;
 use application::{MI_B, args};
@@ -28,19 +28,7 @@ fn main() -> io::Result<()> {
     let mut client = blocking::Client::new(client, config)?;
     let remote = remotes[0].slice(0..512 * MI_B);
 
-    if args.default.latency {
-        latency_blocking(&mut client, remote)?;
-    }
-
-    if args.default.throughput {
-        throughput_blocking(&mut client, remote)?;
-    }
-
-    if args.default.validate {
-        validate_blocking(&mut client, remote)?;
-    }
-
-    Ok(())
+    bench_blocking(&mut client, &remote, &args.default)
 }
 
 impl From<&CLI> for blocking::Config {

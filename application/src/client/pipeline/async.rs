@@ -162,7 +162,7 @@ impl Client {
 }
 
 impl AsyncClient for Client {
-    async fn prefetch(&self, bytes: BytesMut, remote: RemoteMemorySlice) -> io::Result<BytesMut> {
+    async fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
         let chunk_size = self.config.chunk_size;
 

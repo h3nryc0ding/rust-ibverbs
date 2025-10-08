@@ -1,4 +1,4 @@
-use application::args::{latency_async, throughput_async, validate_async};
+use application::args::bench_async;
 use application::client::BaseClient;
 use application::client::naive::r#async::Client;
 use application::{MI_B, args};
@@ -28,17 +28,5 @@ async fn main() -> io::Result<()> {
     let mut client = Client::new(client).await?;
     let remote = remotes[0].slice(0..512 * MI_B);
 
-    if args.default.latency {
-        latency_async(&mut client, remote).await?;
-    }
-
-    if args.default.throughput {
-        throughput_async(&mut client, remote).await?;
-    }
-
-    if args.default.validate {
-        validate_async(&mut client, remote).await?;
-    }
-
-    Ok(())
+    bench_async(&mut client, &remote, &args.default).await
 }

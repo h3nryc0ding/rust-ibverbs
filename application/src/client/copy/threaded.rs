@@ -177,11 +177,7 @@ impl Client {
 }
 
 impl NonBlockingClient for Client {
-    fn prefetch(
-        &mut self,
-        bytes: BytesMut,
-        remote: RemoteMemorySlice,
-    ) -> io::Result<RequestHandle> {
+    fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<RequestHandle> {
         assert_eq!(bytes.len(), remote.len());
         let mr_size = self.config.mr_size;
 

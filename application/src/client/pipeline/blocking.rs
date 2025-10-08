@@ -24,7 +24,7 @@ impl Client {
 }
 
 impl BlockingClient for Client {
-    fn fetch(&mut self, bytes: BytesMut, remote: RemoteMemorySlice) -> io::Result<BytesMut> {
+    fn fetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
         let chunk_size = self.config.chunk_size;
 
@@ -52,7 +52,7 @@ impl BlockingClient for Client {
                 let local = mr.slice_local(..).collect::<Vec<_>>();
 
                 let mut posted = false;
-                for qp in &mut self.base.qps {
+                for qp in &self.base.qps {
                     match unsafe { qp.post_read(&local, remote, chunk as u64) } {
                         Ok(_) => {
                             posted = true;

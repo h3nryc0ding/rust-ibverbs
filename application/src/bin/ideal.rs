@@ -1,4 +1,4 @@
-use application::args::{latency_blocking, throughput_blocking};
+use application::args::bench_blocking;
 use application::client::BaseClient;
 use application::client::ideal::{Client, Config};
 use application::{MI_B, args};
@@ -19,7 +19,7 @@ pub struct CLI {
 }
 
 fn main() -> io::Result<()> {
-    let args = CLI::parse();
+    let mut args = CLI::parse();
 
     let client = BaseClient::new(args.default.addr)?;
     let remotes = client.remotes();
@@ -28,15 +28,9 @@ fn main() -> io::Result<()> {
     let mut client = Client::new(client, config)?;
     let remote = remotes[0].slice(0..512 * MI_B);
 
-    if args.default.latency {
-        latency_blocking(&mut client, remote)?;
-    }
+    args.default.validate = false;
 
-    if args.default.throughput {
-        throughput_blocking(&mut client, remote)?;
-    }
-
-    Ok(())
+    bench_blocking(&mut client, &remote, &args.default)
 }
 
 impl From<&CLI> for Config {

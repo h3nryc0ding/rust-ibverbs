@@ -1,5 +1,5 @@
 use crate::client::{AsyncClient, BlockingClient, NonBlockingClient};
-use crate::{GI_B, chunks_mut_exact};
+use crate::{GI_B, MI_B, chunks_mut_exact};
 use bytes::BytesMut;
 use clap::Parser;
 use ibverbs::RemoteMemorySlice;
@@ -11,26 +11,49 @@ use std::time::Instant;
 pub struct Args {
     pub addr: IpAddr,
 
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     pub validate: bool,
 
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     pub latency: bool,
 
-    #[arg(long, default_value_t = true)]
+    #[arg(long, default_value_t = false)]
     pub throughput: bool,
+
+    #[arg(short, long, default_value_t = 1000)]
+    pub iterations: usize,
+
+    #[arg(short, long, default_value_t = 512 * MI_B)]
+    pub size: usize,
 }
 
-pub fn latency_blocking<C: BlockingClient>(
+pub fn bench_blocking<C: BlockingClient>(
     client: &mut C,
-    remote: RemoteMemorySlice,
+    remote: &RemoteMemorySlice,
+    args: &Args,
 ) -> io::Result<()> {
-    let iterations = 10;
-    let size = remote.len();
+    if args.latency {
+        latency_blocking(client, remote, args)?;
+    }
+    if args.throughput {
+        throughput_blocking(client, remote, args)?;
+    }
 
-    let mut latencies = Vec::with_capacity(iterations);
-    for _ in 0..iterations {
-        let bytes = BytesMut::zeroed(size);
+    if args.validate {
+        validate_blocking(client, remote)?;
+    }
+
+    Ok(())
+}
+
+fn latency_blocking<C: BlockingClient>(
+    client: &mut C,
+    remote: &RemoteMemorySlice,
+    args: &Args,
+) -> io::Result<()> {
+    let mut latencies = Vec::with_capacity(args.iterations);
+    for _ in 0..args.iterations {
+        let bytes = BytesMut::zeroed(args.size);
 
         let start = Instant::now();
         let _ = client.fetch(bytes, remote)?;
@@ -43,28 +66,26 @@ pub fn latency_blocking<C: BlockingClient>(
     Ok(())
 }
 
-pub fn throughput_blocking<C: BlockingClient>(
+fn throughput_blocking<C: BlockingClient>(
     client: &mut C,
-    remote: RemoteMemorySlice,
+    remote: &RemoteMemorySlice,
+    args: &Args,
 ) -> io::Result<()> {
-    let iterations = 10;
-    let size = remote.len();
-
-    let bytes = BytesMut::zeroed(size * iterations);
+    let bytes = BytesMut::zeroed(args.size * args.iterations);
 
     let start = Instant::now();
-    for bytes in chunks_mut_exact(bytes, size) {
+    for bytes in chunks_mut_exact(bytes, args.size) {
         let _ = client.fetch(bytes, remote)?;
     }
     let end = Instant::now();
 
-    print_throughput(size as f64 * iterations as f64, end - start);
+    print_throughput(args.size as f64 * args.iterations as f64, end - start);
     Ok(())
 }
 
-pub fn validate_blocking<C: BlockingClient>(
+fn validate_blocking<C: BlockingClient>(
     client: &mut C,
-    remote: RemoteMemorySlice,
+    remote: &RemoteMemorySlice,
 ) -> io::Result<()> {
     let size = remote.len();
 
@@ -75,16 +96,33 @@ pub fn validate_blocking<C: BlockingClient>(
     Ok(())
 }
 
-pub fn latency_threaded<C: NonBlockingClient>(
+pub fn bench_threaded<C: NonBlockingClient>(
     client: &mut C,
-    remote: RemoteMemorySlice,
+    remote: &RemoteMemorySlice,
+    args: &Args,
 ) -> io::Result<()> {
-    let iterations = 10;
-    let size = remote.len();
+    if args.latency {
+        latency_threaded(client, remote, args)?;
+    }
+    if args.throughput {
+        throughput_threaded(client, remote, args)?;
+    }
 
-    let mut latencies = Vec::with_capacity(iterations);
-    for _ in 0..iterations {
-        let bytes = BytesMut::zeroed(size);
+    if args.validate {
+        validate_threaded(client, remote)?;
+    }
+
+    Ok(())
+}
+
+fn latency_threaded<C: NonBlockingClient>(
+    client: &mut C,
+    remote: &RemoteMemorySlice,
+    args: &Args,
+) -> io::Result<()> {
+    let mut latencies = Vec::with_capacity(args.iterations);
+    for _ in 0..args.iterations {
+        let bytes = BytesMut::zeroed(args.size);
 
         let start = Instant::now();
         let _ = client.prefetch(bytes, remote)?.wait();
@@ -97,18 +135,16 @@ pub fn latency_threaded<C: NonBlockingClient>(
     Ok(())
 }
 
-pub fn throughput_threaded<C: NonBlockingClient>(
+fn throughput_threaded<C: NonBlockingClient>(
     client: &mut C,
-    remote: RemoteMemorySlice,
+    remote: &RemoteMemorySlice,
+    args: &Args,
 ) -> io::Result<()> {
-    let iterations = 10;
-    let size = remote.len();
-
-    let bytes = BytesMut::zeroed(size * iterations);
-    let mut handles = Vec::with_capacity(iterations);
+    let bytes = BytesMut::zeroed(args.size * args.iterations);
+    let mut handles = Vec::with_capacity(args.iterations);
 
     let start = Instant::now();
-    for bytes in chunks_mut_exact(bytes, size) {
+    for bytes in chunks_mut_exact(bytes, args.size) {
         handles.push(client.prefetch(bytes, remote)?);
     }
     for handle in handles {
@@ -116,13 +152,13 @@ pub fn throughput_threaded<C: NonBlockingClient>(
     }
     let end = Instant::now();
 
-    print_throughput(iterations as f64 * size as f64, end - start);
+    print_throughput(args.iterations as f64 * args.size as f64, end - start);
     Ok(())
 }
 
-pub fn validate_threaded<C: NonBlockingClient>(
+fn validate_threaded<C: NonBlockingClient>(
     client: &mut C,
-    remote: RemoteMemorySlice,
+    remote: &RemoteMemorySlice,
 ) -> io::Result<()> {
     let size = remote.len();
 
@@ -133,16 +169,33 @@ pub fn validate_threaded<C: NonBlockingClient>(
     Ok(())
 }
 
-pub async fn latency_async<C: AsyncClient>(
+pub async fn bench_async<C: AsyncClient>(
     client: &mut C,
-    remote: RemoteMemorySlice,
+    remote: &RemoteMemorySlice,
+    args: &Args,
 ) -> io::Result<()> {
-    let iterations = 10;
-    let size = remote.len();
+    if args.latency {
+        latency_async(client, remote, args).await?;
+    }
+    if args.throughput {
+        throughput_async(client, remote, args).await?;
+    }
 
-    let mut latencies = Vec::with_capacity(iterations);
-    for _ in 0..iterations {
-        let bytes = BytesMut::zeroed(size);
+    if args.validate {
+        validate_async(client, remote).await?;
+    }
+
+    Ok(())
+}
+
+async fn latency_async<C: AsyncClient>(
+    client: &mut C,
+    remote: &RemoteMemorySlice,
+    args: &Args,
+) -> io::Result<()> {
+    let mut latencies = Vec::with_capacity(args.iterations);
+    for _ in 0..args.iterations {
+        let bytes = BytesMut::zeroed(args.size);
 
         let start = Instant::now();
         let _ = client.prefetch(bytes, remote).await?;
@@ -155,30 +208,28 @@ pub async fn latency_async<C: AsyncClient>(
     Ok(())
 }
 
-pub async fn throughput_async<C: AsyncClient>(
+async fn throughput_async<C: AsyncClient>(
     client: &mut C,
-    remote: RemoteMemorySlice,
+    remote: &RemoteMemorySlice,
+    args: &Args,
 ) -> io::Result<()> {
-    let iterations = 10;
-    let size = remote.len();
-
-    let bytes = BytesMut::zeroed(size * iterations);
-    let mut futures = Vec::with_capacity(iterations);
+    let bytes = BytesMut::zeroed(args.size * args.iterations);
+    let mut futures = Vec::with_capacity(args.iterations);
 
     let start = Instant::now();
-    for bytes in chunks_mut_exact(bytes, size) {
+    for bytes in chunks_mut_exact(bytes, args.size) {
         futures.push(client.prefetch(bytes, remote));
     }
     futures::future::join_all(futures).await;
     let end = Instant::now();
 
-    print_throughput(size as f64 * iterations as f64, end - start);
+    print_throughput(args.size as f64 * args.iterations as f64, end - start);
     Ok(())
 }
 
-pub async fn validate_async<C: AsyncClient>(
+async fn validate_async<C: AsyncClient>(
     client: &mut C,
-    remote: RemoteMemorySlice,
+    remote: &RemoteMemorySlice,
 ) -> io::Result<()> {
     let size = remote.len();
 

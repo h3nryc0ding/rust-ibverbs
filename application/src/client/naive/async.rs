@@ -145,7 +145,7 @@ impl Client {
 }
 
 impl AsyncClient for Client {
-    async fn prefetch(&self, bytes: BytesMut, remote: RemoteMemorySlice) -> io::Result<BytesMut> {
+    async fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
         let id = self.id.fetch_add(1, Ordering::Relaxed);
 
@@ -155,7 +155,7 @@ impl AsyncClient for Client {
             id,
             state: handle.core.clone(),
             bytes,
-            remote,
+            remote: remote.slice(..),
         };
         trace!(message = ?msg, operation = "send", channel = "reg");
         self.reg_tx.send(msg).unwrap();

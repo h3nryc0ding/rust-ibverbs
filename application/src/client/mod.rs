@@ -20,18 +20,17 @@ pub struct BaseClient {
 }
 
 pub trait BlockingClient {
-    fn fetch(&mut self, bytes: BytesMut, remote: RemoteMemorySlice) -> io::Result<BytesMut>;
+    fn fetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut>;
 }
 
 pub trait NonBlockingClient {
-    fn prefetch(&mut self, bytes: BytesMut, remote: RemoteMemorySlice)
-    -> io::Result<RequestHandle>;
+    fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<RequestHandle>;
 }
 
 pub trait AsyncClient {
     fn prefetch(
         &self,
         bytes: BytesMut,
-        remote: RemoteMemorySlice,
+        remote: &RemoteMemorySlice,
     ) -> impl Future<Output = io::Result<BytesMut>>;
 }
