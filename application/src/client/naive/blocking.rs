@@ -14,7 +14,7 @@ impl Client {
 }
 
 impl BlockingClient for Client {
-    fn fetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
+    fn fetch(&mut self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
 
         let mr = self.base.pd.register(bytes)?;

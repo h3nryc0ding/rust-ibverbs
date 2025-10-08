@@ -42,22 +42,20 @@ impl Client {
 }
 
 impl BlockingClient for Client {
-    fn fetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
+    fn fetch(&mut self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
         let chunk_size = self.config.mr_size;
         let mut completions = vec![ibv_wc::default(); self.config.mr_count];
 
         let mut chunks = chunks_mut_exact(bytes, chunk_size).collect::<Vec<_>>();
 
-        let mut unused = VecDeque::from_iter(0..self.config.mr_count);
         let mut outstanding = HashMap::new();
         let mut chunk = 0;
         let mut received = 0;
 
         while received < chunks.len() {
             while chunk < chunks.len() {
-                if let Some(mr_id) = unused.pop_front() {
-                    let mr = &self.mrs[mr_id];
+                if let Some(mr) = self.mrs.pop_front() {
                     let start = chunk * chunk_size;
                     let length = chunks[chunk].len();
                     let local = mr.slice_local(..length).collect::<Vec<_>>();
@@ -77,10 +75,10 @@ impl BlockingClient for Client {
                         }
                     }
                     if !posted {
-                        unused.push_front(mr_id);
+                        self.mrs.push_front(mr);
                         break;
                     } else {
-                        outstanding.insert(chunk, mr_id);
+                        outstanding.insert(chunk, mr);
                         chunk += 1;
                     }
                 } else {
@@ -92,13 +90,12 @@ impl BlockingClient for Client {
                 assert!(completion.is_valid());
                 let chunk = completion.wr_id() as usize;
 
-                if let Some(mr_id) = outstanding.remove(&chunk) {
-                    let mr = &self.mrs[mr_id];
+                if let Some(mr) = outstanding.remove(&chunk) {
                     let src_slice = mr.as_slice();
                     let dst_slice = chunks[chunk].as_mut();
                     dst_slice.copy_from_slice(src_slice);
 
-                    unused.push_back(mr_id);
+                    self.mrs.push_back(mr);
                     received += 1;
                 } else {
                     panic!("unknown completion: {completion:?}");

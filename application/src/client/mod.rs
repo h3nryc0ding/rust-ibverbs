@@ -20,7 +20,7 @@ pub struct BaseClient {
 }
 
 pub trait BlockingClient {
-    fn fetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut>;
+    fn fetch(&mut self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut>;
 }
 
 pub trait NonBlockingClient {
