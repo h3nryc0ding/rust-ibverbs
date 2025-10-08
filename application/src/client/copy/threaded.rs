@@ -1,41 +1,44 @@
-use super::lib::{CopyMessage, MRMessage, PRE_ALLOCATIONS, Pending, PostMessage};
+use super::lib::{CopyMessage, MRMessage, Pending, PostMessage};
 use crate::client::{
-    BaseClient, ClientConfig, NonBlockingClient, RequestHandle, decode_wr_id, encode_wr_id,
+    BaseClient, NUMA_NODE, NonBlockingClient, RequestHandle,
+    lib::{decode_wr_id, encode_wr_id},
 };
-use crate::{NUMA_NODE, chunks_mut_exact, pin_thread_to_node};
+use crate::{chunks_mut_exact, pin_thread_to_node};
 use bytes::BytesMut;
 use crossbeam::channel;
 use crossbeam::channel::{Sender, TryRecvError};
-use ibverbs::{Context, MemoryRegion, ibv_wc};
+use ibverbs::{MemoryRegion, RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{hint, io, thread};
 use tracing::trace;
 
-const CONCURRENT_COPIES: usize = 8;
+pub struct Config {
+    pub mr_size: usize,
+    pub mr_count: usize,
+    pub concurrency: usize,
+}
 
 pub struct Client {
     id: AtomicUsize,
-
     post_tx: Sender<PostMessage>,
 
-    config: ClientConfig,
+    config: Config,
 }
 
-impl NonBlockingClient for Client {
-    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
+impl Client {
+    pub fn new(client: BaseClient, config: Config) -> io::Result<Self> {
         pin_thread_to_node::<NUMA_NODE>()?;
 
-        let mut base = BaseClient::new(ctx, cfg)?;
         let id = AtomicUsize::new(0);
 
         let (mr_tx, mr_rx) = channel::unbounded::<MRMessage>();
         let (post_tx, post_rx) = channel::unbounded();
         let (copy_tx, copy_rx) = channel::unbounded();
 
-        for _ in 0..PRE_ALLOCATIONS {
+        for _ in 0..config.mr_count {
             loop {
-                match base.pd.allocate_zeroed(base.cfg.mr_size) {
+                match client.pd.allocate_zeroed(config.mr_size) {
                     Ok(mr) => {
                         mr_tx.send(MRMessage { 0: mr }).unwrap();
                         break;
@@ -49,7 +52,7 @@ impl NonBlockingClient for Client {
             let mut pending = HashMap::new();
             let mut completions = [ibv_wc::default(); 16];
             let mut outstanding = VecDeque::new();
-            let mut mrs: VecDeque<MemoryRegion> = VecDeque::with_capacity(PRE_ALLOCATIONS);
+            let mut mrs: VecDeque<MemoryRegion> = VecDeque::with_capacity(config.mr_count);
 
             loop {
                 match mr_rx.try_recv() {
@@ -75,18 +78,16 @@ impl NonBlockingClient for Client {
                         id,
                         chunk,
                         state,
+                        remote,
                         bytes,
                     } = outstanding.pop_front().unwrap();
 
-                    let local = mr.slice_local(..);
-                    let remote = base
-                        .remote
-                        .slice(chunk * base.cfg.mr_size..(chunk + 1) * base.cfg.mr_size);
+                    let local = mr.slice_local(..bytes.len()).collect::<Vec<_>>();
                     let wr_id = encode_wr_id(id, chunk);
 
                     let mut posted = false;
-                    for qp in &mut base.qps {
-                        match unsafe { qp.post_read(&[local], remote, wr_id) } {
+                    for qp in &client.qps {
+                        match unsafe { qp.post_read(&local, remote, wr_id) } {
                             Ok(_) => {
                                 posted = true;
                                 break;
@@ -103,6 +104,7 @@ impl NonBlockingClient for Client {
                             id,
                             chunk,
                             state,
+                            remote,
                             bytes,
                         })
                     } else {
@@ -111,7 +113,7 @@ impl NonBlockingClient for Client {
                     }
                 }
 
-                for completion in base.cq.poll(&mut completions).unwrap() {
+                for completion in client.cq.poll(&mut completions).unwrap() {
                     assert!(completion.is_valid());
                     let wr_id = completion.wr_id();
 
@@ -133,7 +135,7 @@ impl NonBlockingClient for Client {
             }
         });
 
-        for _ in 0..CONCURRENT_COPIES {
+        for _ in 0..config.concurrency {
             let copy_rx = copy_rx.clone();
             let mr_tx = mr_tx.clone();
             thread::spawn(move || {
@@ -169,16 +171,22 @@ impl NonBlockingClient for Client {
         Ok(Self {
             id,
             post_tx,
-            config: base.cfg,
+            config,
         })
     }
+}
 
-    fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
-        let chunk_size = self.config.mr_size;
-        assert_eq!(bytes.len() % chunk_size, 0);
+impl NonBlockingClient for Client {
+    fn prefetch(
+        &mut self,
+        bytes: BytesMut,
+        remote: RemoteMemorySlice,
+    ) -> io::Result<RequestHandle> {
+        assert_eq!(bytes.len(), remote.len());
+        let mr_size = self.config.mr_size;
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
-        let chunks: Vec<_> = chunks_mut_exact(bytes, chunk_size).collect();
+        let chunks: Vec<_> = chunks_mut_exact(bytes, mr_size).collect();
 
         let handle = RequestHandle::new(chunks.len());
 
@@ -187,6 +195,7 @@ impl NonBlockingClient for Client {
                 id,
                 chunk,
                 state: handle.core.clone(),
+                remote: remote.slice(chunk * mr_size..chunk * mr_size + bytes.len()),
                 bytes,
             };
             trace!(message = ?msg, operation = "send", channel = "post");

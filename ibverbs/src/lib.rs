@@ -74,7 +74,7 @@ use std::os::fd::BorrowedFd;
 use std::os::raw::c_void;
 use std::sync::Arc;
 use std::time::Duration;
-use std::{fmt, io, mem, ptr};
+use std::{fmt, io, iter, mem, ptr};
 
 const PORT_NUM: u8 = 1;
 
@@ -88,6 +88,7 @@ pub use ffi::ibv_wc_status;
 
 /// Access flags for use with `QueuePair` and `MemoryRegion`.
 pub use ffi::ibv_access_flags;
+use ffi::ibv_sge;
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
@@ -1525,43 +1526,64 @@ impl MemoryRegion {
         Ok(bytes)
     }
 
-    pub fn slice_local(&self, bounds: impl RangeBounds<usize>) -> LocalMemorySlice {
-        let (start, end) = self._slice(bounds);
-        let length = unsafe { end.offset_from(start) };
-        LocalMemorySlice {
-            _sge: ffi::ibv_sge {
+    pub fn slice_local(
+        &self,
+        bounds: impl RangeBounds<usize>,
+    ) -> impl Iterator<Item = LocalMemorySlice> + '_ {
+        self._slice(bounds).map(|(start, end)| LocalMemorySlice {
+            _sge: ibv_sge {
                 addr: start as u64,
-                length: u32::try_from(length).unwrap(),
+                length: unsafe { end.offset_from(start) as u32 },
                 lkey: self.lkey(),
             },
-        }
+        })
     }
 
-    pub fn slice_remote(&self, bounds: impl RangeBounds<usize>) -> RemoteMemorySlice {
-        let (start, end) = self._slice(bounds);
-        let length = unsafe { end.offset_from(start) };
-        RemoteMemorySlice {
+    pub fn slice_remote(
+        &self,
+        bounds: impl RangeBounds<usize>,
+    ) -> impl Iterator<Item = RemoteMemorySlice> + '_ {
+        self._slice(bounds).map(|(start, end)| RemoteMemorySlice {
             addr: start as u64,
-            length: u32::try_from(length).unwrap(),
+            length: unsafe { end.offset_from(start) } as u32,
             rkey: self.rkey(),
-        }
+        })
     }
 
-    fn _slice(&self, bounds: impl RangeBounds<usize>) -> (*const u8, *const u8) {
-        let start = match bounds.start_bound() {
+    fn _slice(
+        &self,
+        bounds: impl RangeBounds<usize>,
+    ) -> impl Iterator<Item = (*const u8, *const u8)> + '_ {
+        let start_off = match bounds.start_bound() {
             Bound::Included(&n) => n,
             Bound::Excluded(&n) => n + 1,
             Bound::Unbounded => 0,
         };
-        let end = match bounds.end_bound() {
+        let end_off = match bounds.end_bound() {
             Bound::Included(&n) => n + 1,
             Bound::Excluded(&n) => n,
             Bound::Unbounded => self.bytes.len(),
         };
-        assert!(start <= self.bytes.len());
-        assert!(end <= self.bytes.len());
-        assert!(start <= end);
-        unsafe { (self.bytes.as_ptr().add(start), self.bytes.as_ptr().add(end)) }
+        assert!(start_off <= self.bytes.len());
+        assert!(end_off <= self.bytes.len());
+        assert!(start_off <= end_off);
+
+        let start = unsafe { self.bytes.as_ptr().add(start_off) };
+        let end = unsafe { self.bytes.as_ptr().add(end_off) };
+
+        let mut curr = start;
+        iter::from_fn(move || {
+            if curr >= end {
+                return None;
+            }
+
+            let start = curr;
+            let remaining = unsafe { end.offset_from(start) } as usize;
+            let length = remaining.min(u32::MAX as usize);
+
+            curr = unsafe { curr.add(length) };
+            Some((start, curr))
+        })
     }
 }
 

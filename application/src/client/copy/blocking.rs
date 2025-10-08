@@ -1,23 +1,28 @@
-use super::lib::PRE_ALLOCATIONS;
-use crate::client::{BaseClient, BlockingClient, ClientConfig};
+use crate::chunks_mut_exact;
+use crate::client::{BaseClient, BlockingClient};
 use bytes::BytesMut;
-use ibverbs::{Context, MemoryRegion, ibv_wc};
+use ibverbs::{MemoryRegion, RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::{hint, io};
+
+pub struct Config {
+    pub mr_size: usize,
+    pub mr_count: usize,
+}
 
 pub struct Client {
     base: BaseClient,
     mrs: VecDeque<MemoryRegion>,
+
+    config: Config,
 }
 
-impl BlockingClient for Client {
-    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
-        let base = BaseClient::new(ctx, cfg)?;
-
-        let mut mrs = VecDeque::with_capacity(PRE_ALLOCATIONS);
-        for _ in 0..PRE_ALLOCATIONS {
+impl Client {
+    pub fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+        let mut mrs = VecDeque::with_capacity(config.mr_count);
+        for _ in 0..config.mr_count {
             loop {
-                match base.pd.allocate_zeroed(base.cfg.mr_size) {
+                match client.pd.allocate_zeroed(config.mr_size) {
                     Ok(mr) => {
                         mrs.push_back(mr);
                         break;
@@ -28,32 +33,37 @@ impl BlockingClient for Client {
             }
         }
 
-        Ok(Self { base, mrs })
+        Ok(Self {
+            base: client,
+            mrs,
+            config,
+        })
     }
+}
 
-    fn request(&mut self, mut bytes: BytesMut) -> io::Result<BytesMut> {
-        let mr_size = self.base.cfg.mr_size;
-        assert_eq!(bytes.len() % mr_size, 0);
+impl BlockingClient for Client {
+    fn fetch(&mut self, bytes: BytesMut, remote: RemoteMemorySlice) -> io::Result<BytesMut> {
+        assert_eq!(bytes.len(), remote.len());
+        let chunk_size = self.config.mr_size;
+        let mut completions = vec![ibv_wc::default(); self.config.mr_count];
 
-        let chunks = bytes.len() / mr_size;
-        let mut completions = vec![ibv_wc::default(); PRE_ALLOCATIONS];
+        let mut chunks = chunks_mut_exact(bytes, chunk_size).collect::<Vec<_>>();
 
         let mut outstanding = HashMap::new();
         let mut chunk = 0;
         let mut received = 0;
 
-        while received < chunks {
-            while chunk < chunks {
+        while received < chunks.len() {
+            while chunk < chunks.len() {
                 if let Some(mr) = self.mrs.pop_front() {
-                    let local = mr.slice_local(..);
-                    let remote_slice = self
-                        .base
-                        .remote
-                        .slice(chunk * mr_size..(chunk + 1) * mr_size);
+                    let start = chunk * chunk_size;
+                    let length = chunks[chunk].len();
+                    let local = mr.slice_local(..length).collect::<Vec<_>>();
+                    let remote = remote.slice(start..start + length);
 
                     let mut posted = false;
                     for qp in &mut self.base.qps {
-                        match unsafe { qp.post_read(&[local], remote_slice, chunk as u64) } {
+                        match unsafe { qp.post_read(&local, remote, chunk as u64) } {
                             Ok(_) => {
                                 posted = true;
                                 break;
@@ -82,7 +92,7 @@ impl BlockingClient for Client {
 
                 if let Some(mr) = outstanding.remove(&chunk) {
                     let src_slice = mr.as_slice();
-                    let dst_slice = &mut bytes[chunk * mr_size..(chunk + 1) * mr_size];
+                    let dst_slice = chunks[chunk].as_mut();
                     dst_slice.copy_from_slice(src_slice);
 
                     self.mrs.push_back(mr);
@@ -93,6 +103,12 @@ impl BlockingClient for Client {
             }
         }
 
-        Ok(bytes)
+        chunks
+            .into_iter()
+            .reduce(|mut res, nxt| {
+                res.unsplit(nxt);
+                res
+            })
+            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
     }
 }

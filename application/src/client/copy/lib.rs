@@ -1,11 +1,9 @@
-use crate::client::RequestCore;
+use crate::client::lib::RequestCore;
 use bytes::BytesMut;
-use ibverbs::MemoryRegion;
+use ibverbs::{MemoryRegion, RemoteMemorySlice};
 use std::fmt;
 use std::fmt::{Debug, Formatter};
 use std::sync::Arc;
-
-pub(crate) const PRE_ALLOCATIONS: usize = 64;
 
 pub(crate) struct Pending {
     pub(crate) state: Arc<RequestCore>,
@@ -19,6 +17,7 @@ pub(crate) struct PostMessage {
     pub(crate) id: usize,
     pub(crate) chunk: usize,
     pub(crate) state: Arc<RequestCore>,
+    pub(crate) remote: RemoteMemorySlice,
     pub(crate) bytes: BytesMut,
 }
 

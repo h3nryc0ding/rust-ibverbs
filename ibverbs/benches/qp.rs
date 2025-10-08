@@ -30,7 +30,7 @@ pub fn benchmark(c: &mut Criterion) {
         pqp.handshake(local).unwrap()
     };
     let mr = pd.allocate_zeroed(4 * GB).unwrap();
-    let remote = mr.slice_remote(..);
+    let remote = mr.slice_remote(..).next().unwrap();
 
     let mut group = c.benchmark_group("QueuePair");
     for size in [
@@ -63,9 +63,9 @@ pub fn benchmark(c: &mut Criterion) {
                     let mut completions = [ibv_wc::default(); BATCH_SIZE];
 
                     for (idx, mr) in mrs.iter().enumerate() {
-                        let local_slice = mr.slice_local(..);
+                        let local_slice = mr.slice_local(..).collect::<Vec<_>>();
                         let remote_slice = remote.slice(idx * size..(idx + 1) * size);
-                        while let Err(_) = qp.post_read(&[local_slice], remote_slice, idx as u64) {
+                        while let Err(_) = qp.post_read(&local_slice, remote_slice, idx as u64) {
                             done += poll(&cq, &mut completions[done..]);
                             hint::spin_loop();
                         }

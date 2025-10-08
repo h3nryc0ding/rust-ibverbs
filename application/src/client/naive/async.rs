@@ -1,7 +1,7 @@
-use super::lib::{DeregistrationMessage, PostMessage, RegistrationMessage};
-use crate::client::{AsyncClient, BaseClient, ClientConfig, RequestHandle};
+use super::lib::{DeregistrationMessage, Pending, PostMessage, RegistrationMessage};
+use crate::client::{AsyncClient, BaseClient, RequestHandle};
 use bytes::BytesMut;
-use ibverbs::{Context, ibv_wc};
+use ibverbs::{RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
@@ -14,20 +14,18 @@ use tracing::trace;
 
 pub struct Client {
     id: AtomicUsize,
-
     reg_tx: UnboundedSender<RegistrationMessage>,
 }
 
-impl AsyncClient for Client {
-    async fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
-        let mut base = BaseClient::new(ctx, cfg)?;
+impl Client {
+    pub async fn new(client: BaseClient) -> io::Result<Self> {
         let id = AtomicUsize::new(0);
 
         let (reg_tx, mut reg_rx) = mpsc::unbounded_channel();
         let (post_tx, mut post_rx) = mpsc::unbounded_channel();
         let (dereg_tx, mut dereg_rx) = mpsc::unbounded_channel();
 
-        let pd = Arc::new(base.pd);
+        let pd = Arc::new(client.pd);
         task::spawn(async move {
             while let Some(msg) = reg_rx.recv().await {
                 let pd = pd.clone();
@@ -35,7 +33,12 @@ impl AsyncClient for Client {
 
                 task::spawn_blocking(move || {
                     trace!(message = ?msg, operation = "recv", channel = "reg");
-                    let RegistrationMessage { id, state, bytes } = msg;
+                    let RegistrationMessage {
+                        id,
+                        state,
+                        bytes,
+                        remote,
+                    } = msg;
 
                     let mr = pd.register(bytes).unwrap();
                     state
@@ -43,7 +46,12 @@ impl AsyncClient for Client {
                         .registered_acquired
                         .fetch_add(1, Ordering::Relaxed);
 
-                    let msg = PostMessage { id, state, mr };
+                    let msg = PostMessage {
+                        id,
+                        state,
+                        mr,
+                        remote,
+                    };
                     trace!(message = ?msg, operation = "send", channel = "post");
                     post_tx.send(msg).unwrap();
                 });
@@ -56,13 +64,18 @@ impl AsyncClient for Client {
             let mut completions = [ibv_wc::default(); 16];
 
             loop {
-                if let Some(PostMessage { id, state, mr }) = waiting.pop_front() {
-                    let local = mr.slice_local(..);
-                    let remote = base.remote.slice(0..mr.len());
+                if let Some(PostMessage {
+                    id,
+                    state,
+                    mr,
+                    remote,
+                }) = waiting.pop_front()
+                {
+                    let local = mr.slice_local(..).collect::<Vec<_>>();
 
                     let mut posted = false;
-                    for qp in &mut base.qps {
-                        match unsafe { qp.post_read(&[local], remote, id as u64) } {
+                    for qp in &client.qps {
+                        match unsafe { qp.post_read(&local, remote, id as u64) } {
                             Ok(_) => {
                                 posted = true;
                                 break;
@@ -73,9 +86,14 @@ impl AsyncClient for Client {
                     }
                     if posted {
                         state.progress.posted.fetch_add(1, Ordering::Relaxed);
-                        pending.insert(id, (state, mr));
+                        pending.insert(id, Pending { state, mr });
                     } else {
-                        waiting.push_front(PostMessage { id, state, mr });
+                        waiting.push_front(PostMessage {
+                            id,
+                            state,
+                            mr,
+                            remote,
+                        });
                     }
                 }
 
@@ -88,11 +106,11 @@ impl AsyncClient for Client {
                     _ => {}
                 }
 
-                for completion in base.cq.poll(&mut completions).unwrap() {
+                for completion in client.cq.poll(&mut completions).unwrap() {
                     assert!(completion.is_valid());
                     let id = completion.wr_id() as usize;
 
-                    if let Some((state, mr)) = pending.remove(&id) {
+                    if let Some(Pending { state, mr }) = pending.remove(&id) {
                         state.progress.received.fetch_add(1, Ordering::Relaxed);
 
                         let msg = DeregistrationMessage { id, state, mr };
@@ -124,8 +142,11 @@ impl AsyncClient for Client {
 
         Ok(Self { id, reg_tx })
     }
+}
 
-    async fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
+impl AsyncClient for Client {
+    async fn prefetch(&self, bytes: BytesMut, remote: RemoteMemorySlice) -> io::Result<BytesMut> {
+        assert_eq!(bytes.len(), remote.len());
         let id = self.id.fetch_add(1, Ordering::Relaxed);
 
         let handle = RequestHandle::new(1);
@@ -134,10 +155,11 @@ impl AsyncClient for Client {
             id,
             state: handle.core.clone(),
             bytes,
+            remote,
         };
         trace!(message = ?msg, operation = "send", channel = "reg");
         self.reg_tx.send(msg).unwrap();
 
-        Ok(handle)
+        handle.wait() // TODO: no fire and forget
     }
 }

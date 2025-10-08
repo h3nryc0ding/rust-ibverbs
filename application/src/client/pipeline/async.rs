@@ -1,10 +1,11 @@
 use super::lib::{DeregistrationMessage, PostMessage, RegistrationMessage};
 use crate::chunks_mut_exact;
 use crate::client::{
-    AsyncClient, BaseClient, ClientConfig, RequestHandle, decode_wr_id, encode_wr_id,
+    AsyncClient, BaseClient, RequestHandle,
+    lib::{decode_wr_id, encode_wr_id},
 };
 use bytes::BytesMut;
-use ibverbs::{Context, ibv_wc};
+use ibverbs::{RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
@@ -15,24 +16,26 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task;
 use tracing::trace;
 
-pub struct Client {
-    id: AtomicUsize,
-
-    reg_tx: UnboundedSender<RegistrationMessage>,
-
-    config: ClientConfig,
+pub struct Config {
+    pub chunk_size: usize,
 }
 
-impl AsyncClient for Client {
-    async fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
-        let mut base = BaseClient::new(ctx, cfg)?;
+pub struct Client {
+    id: AtomicUsize,
+    reg_tx: UnboundedSender<RegistrationMessage>,
+
+    config: Config,
+}
+
+impl Client {
+    pub async fn new(client: BaseClient, config: Config) -> io::Result<Self> {
         let id = AtomicUsize::new(0);
 
         let (reg_tx, mut reg_rx) = mpsc::unbounded_channel();
         let (post_tx, mut post_rx) = mpsc::unbounded_channel();
         let (dereg_tx, mut dereg_rx) = mpsc::unbounded_channel();
 
-        let pd = Arc::new(base.pd);
+        let pd = Arc::new(client.pd);
         task::spawn(async move {
             while let Some(msg) = reg_rx.recv().await {
                 let pd = pd.clone();
@@ -43,6 +46,7 @@ impl AsyncClient for Client {
                         id,
                         chunk,
                         state,
+                        remote,
                         bytes,
                     } = msg;
                     let mr = pd.register(bytes).unwrap();
@@ -55,6 +59,7 @@ impl AsyncClient for Client {
                         chunk,
                         state,
                         mr,
+                        remote,
                     };
                     trace!(message = ?msg, operation = "send", channel = "post");
                     post_tx.send(msg).unwrap();
@@ -73,17 +78,15 @@ impl AsyncClient for Client {
                     chunk,
                     state,
                     mr,
+                    remote,
                 }) = waiting.pop_front()
                 {
-                    let local = mr.slice_local(..);
-                    let remote = base
-                        .remote
-                        .slice(chunk * base.cfg.mr_size..(chunk + 1) * base.cfg.mr_size);
+                    let local = mr.slice_local(..).collect::<Vec<_>>();
                     let wr_id = encode_wr_id(id, chunk);
 
                     let mut posted = false;
-                    for qp in &mut base.qps {
-                        match unsafe { qp.post_read(&[local], remote, wr_id) } {
+                    for qp in &client.qps {
+                        match unsafe { qp.post_read(&local, remote, wr_id) } {
                             Ok(_) => {
                                 posted = true;
                                 break;
@@ -101,6 +104,7 @@ impl AsyncClient for Client {
                             chunk,
                             state,
                             mr,
+                            remote,
                         });
                     }
                 }
@@ -114,7 +118,7 @@ impl AsyncClient for Client {
                     _ => {}
                 }
 
-                for completion in base.cq.poll(&mut completions).unwrap() {
+                for completion in client.cq.poll(&mut completions).unwrap() {
                     assert!(completion.is_valid());
                     let wr_id = completion.wr_id();
 
@@ -153,19 +157,17 @@ impl AsyncClient for Client {
             }
         });
 
-        Ok(Self {
-            id,
-            reg_tx,
-            config: base.cfg,
-        })
+        Ok(Self { id, reg_tx, config })
     }
+}
 
-    async fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
-        let chunk_size = self.config.mr_size;
-        assert_eq!(bytes.len() % chunk_size, 0);
+impl AsyncClient for Client {
+    async fn prefetch(&self, bytes: BytesMut, remote: RemoteMemorySlice) -> io::Result<BytesMut> {
+        assert_eq!(bytes.len(), remote.len());
+        let chunk_size = self.config.chunk_size;
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
-        let chunks: Vec<_> = chunks_mut_exact(bytes, chunk_size).collect();
+        let chunks = chunks_mut_exact(bytes, chunk_size).collect::<Vec<_>>();
 
         let handle = RequestHandle::new(chunks.len());
 
@@ -174,12 +176,13 @@ impl AsyncClient for Client {
                 id,
                 chunk,
                 state: handle.core.clone(),
+                remote: remote.slice(chunk * chunk_size..chunk * chunk_size + bytes.len()),
                 bytes,
             };
             trace!(message = ?msg, operation = "send", channel = "reg");
             self.reg_tx.send(msg).unwrap()
         }
 
-        Ok(handle)
+        handle.wait() // TODO: no fire and forget
     }
 }

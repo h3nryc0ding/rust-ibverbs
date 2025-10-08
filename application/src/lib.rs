@@ -7,8 +7,11 @@ use hwlocality::memory::binding::{MemoryBindingFlags, MemoryBindingPolicy};
 use hwlocality::object::depth::Depth;
 use std::{io, iter};
 
+pub mod args;
 pub mod client;
 pub mod server;
+
+pub const PORT: u16 = 1337;
 
 pub static KI_B: usize = 1024;
 pub static KB: usize = 1000;
@@ -17,11 +20,7 @@ pub static MB: usize = 1000 * KB;
 pub static GI_B: usize = 1024 * MI_B;
 pub static GB: usize = 1000 * MB;
 
-pub const BINCODE_CONFIG: Configuration = standard();
-
-pub const NUMA_NODE: usize = 1;
-
-pub const SERVER_DATA_SIZE: usize = 2 * GI_B;
+pub(crate) const BINCODE_CONFIG: Configuration = standard();
 
 fn pin_thread_to_node<const NODE: usize>() -> io::Result<()> {
     let tid = hwlocality::current_thread_id();

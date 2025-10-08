@@ -1,14 +1,18 @@
-use crate::{BINCODE_CONFIG, SERVER_DATA_SIZE};
+use crate::{BINCODE_CONFIG, PORT, pin_thread_to_node};
 use bincode::serde::{decode_from_std_read, encode_into_std_write};
 use ibverbs::ibv_qp_type::IBV_QPT_RC;
-use ibverbs::{CompletionQueue, Context, MemoryRegion, ProtectionDomain, QueuePair};
+use ibverbs::{CompletionQueue, MemoryRegion, ProtectionDomain, QueuePair};
 use std::io;
-use std::net::{TcpListener, TcpStream, ToSocketAddrs};
+use std::net::{Ipv6Addr, TcpListener, TcpStream};
 use tracing::trace;
 
+pub const NUMA_NODE: usize = 0;
+
+pub struct Config {
+    pub size: usize,
+}
+
 pub struct Server {
-    #[allow(dead_code)]
-    ctx: Context,
     pd: ProtectionDomain,
     cq: CompletionQueue,
     listener: TcpListener,
@@ -16,16 +20,23 @@ pub struct Server {
 }
 
 impl Server {
-    pub fn new(ctx: Context, addr: impl ToSocketAddrs) -> io::Result<Self> {
-        let listener = TcpListener::bind(addr)?;
+    pub fn new(config: Config) -> io::Result<Self> {
+        pin_thread_to_node::<NUMA_NODE>()?;
+
+        let ctx = ibverbs::devices()?
+            .iter()
+            .next()
+            .ok_or(io::ErrorKind::NotFound)?
+            .open()?;
+
+        let listener = TcpListener::bind((Ipv6Addr::UNSPECIFIED, PORT))?;
         let pd = ctx.alloc_pd()?;
         let cq = ctx.create_cq(1024, 0)?;
-        let mut data = pd.allocate_zeroed(SERVER_DATA_SIZE)?;
-        for i in 0..SERVER_DATA_SIZE {
+        let mut data = pd.allocate_zeroed(config.size)?;
+        for i in 0..config.size {
             data[i] = i as u8;
         }
         Ok(Self {
-            ctx,
             pd,
             cq,
             listener,
@@ -57,9 +68,12 @@ impl Server {
         trace!("Client remote endpoint: {:?}", remote);
         let qp = pqp.handshake(remote)?;
 
-        let remote = self.data.slice_remote(..);
-        encode_into_std_write(&remote, &mut stream, BINCODE_CONFIG).unwrap();
-        trace!("Server remote slice: {:?}", remote);
+        encode_into_std_write(
+            &self.data.slice_remote(..).collect::<Vec<_>>(),
+            &mut stream,
+            BINCODE_CONFIG,
+        )
+        .unwrap();
 
         Ok(qp)
     }

@@ -1,47 +1,59 @@
 use crate::chunks_mut_exact;
-use crate::client::{BaseClient, BlockingClient, ClientConfig};
+use crate::client::{BaseClient, BlockingClient};
 use bytes::BytesMut;
-use ibverbs::{Context, ibv_wc};
+use ibverbs::{RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 
-pub struct Client(BaseClient);
+pub struct Config {
+    pub chunk_size: usize,
+}
+
+pub struct Client {
+    base: BaseClient,
+    config: Config,
+}
+
+impl Client {
+    pub fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+        Ok(Self {
+            base: client,
+            config,
+        })
+    }
+}
 
 impl BlockingClient for Client {
-    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
-        Ok(Self(BaseClient::new(ctx, cfg)?))
-    }
-
-    fn request(&mut self, bytes: BytesMut) -> io::Result<BytesMut> {
-        let mr_size = self.0.cfg.mr_size;
-        assert_eq!(bytes.len() % mr_size, 0);
+    fn fetch(&mut self, bytes: BytesMut, remote: RemoteMemorySlice) -> io::Result<BytesMut> {
+        assert_eq!(bytes.len(), remote.len());
+        let chunk_size = self.config.chunk_size;
 
         let mut completions = vec![ibv_wc::default(); 16];
 
-        let total = bytes.len() / mr_size;
+        let mut chunks = VecDeque::new();
+        for (chunk, bytes) in chunks_mut_exact(bytes, chunk_size).enumerate() {
+            let start = chunk * chunk_size;
+            let length = bytes.len();
+            chunks.push_back((chunk, bytes, remote.slice(start..start + length)));
+        }
 
-        // VecDeque<(chunk, bytes)>
-        let mut chunks = VecDeque::from_iter(chunks_mut_exact(bytes, mr_size).enumerate());
-        // VecDeque<(chunk, mr)>
         let mut allocated = VecDeque::new();
-        // HashMap<chunk, mr>
         let mut pending = HashMap::new();
-        // HashMap<chunk, mr>
         let mut received = HashMap::new();
 
+        let total = chunks.len();
         while received.len() < total {
-            if let Some((chunk, bytes)) = chunks.pop_front() {
-                let mr = self.0.pd.register(bytes)?;
-                allocated.push_back((chunk, mr));
+            if let Some((chunk, bytes, remote)) = chunks.pop_front() {
+                let mr = self.base.pd.register(bytes)?;
+                allocated.push_back((chunk, mr, remote));
             }
 
-            if let Some((chunk, mr)) = allocated.pop_front() {
-                let local = mr.slice_local(..);
-                let remote = self.0.remote.slice(chunk * mr_size..(chunk + 1) * mr_size);
+            if let Some((chunk, mr, remote)) = allocated.pop_front() {
+                let local = mr.slice_local(..).collect::<Vec<_>>();
 
                 let mut posted = false;
-                for qp in &mut self.0.qps {
-                    match unsafe { qp.post_read(&[local], remote, chunk as u64) } {
+                for qp in &mut self.base.qps {
+                    match unsafe { qp.post_read(&local, remote, chunk as u64) } {
                         Ok(_) => {
                             posted = true;
                             break;
@@ -54,11 +66,11 @@ impl BlockingClient for Client {
                 if posted {
                     pending.insert(chunk, mr);
                 } else {
-                    allocated.push_front((chunk, mr));
+                    allocated.push_front((chunk, mr, remote));
                 }
             }
 
-            for completion in self.0.cq.poll(&mut completions)? {
+            for completion in self.base.cq.poll(&mut completions)? {
                 assert!(completion.is_valid());
                 let chunk = completion.wr_id() as usize;
 

@@ -1,39 +1,41 @@
 use super::lib::{DeregistrationMessage, PostMessage, RegistrationMessage};
 use crate::chunks_mut_exact;
 use crate::client::{
-    BaseClient, ClientConfig, NonBlockingClient, RequestHandle, decode_wr_id, encode_wr_id,
+    BaseClient, NonBlockingClient, RequestHandle,
+    lib::{decode_wr_id, encode_wr_id},
 };
 use bytes::BytesMut;
 use crossbeam::channel;
 use crossbeam::channel::{Sender, TryRecvError};
-use ibverbs::{Context, ibv_wc};
+use ibverbs::{RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{io, thread};
 use tracing::trace;
 
-pub struct Client {
-    id: AtomicUsize,
-
-    reg_tx: Sender<RegistrationMessage>,
-
-    config: ClientConfig,
+pub struct Config {
+    pub chunk_size: usize,
+    pub concurrency_reg: usize,
+    pub concurrency_dereg: usize,
 }
 
-const CONCURRENT_REGISTRATIONS: usize = 8;
-const CONCURRENT_DEREGISTRATIONS: usize = 2;
+pub struct Client {
+    id: AtomicUsize,
+    reg_tx: Sender<RegistrationMessage>,
 
-impl NonBlockingClient for Client {
-    fn new(ctx: Context, cfg: ClientConfig) -> io::Result<Self> {
-        let mut base = BaseClient::new(ctx, cfg)?;
+    config: Config,
+}
+
+impl Client {
+    pub fn new(client: BaseClient, config: Config) -> io::Result<Self> {
         let id = AtomicUsize::new(0);
 
         let (reg_tx, reg_rx) = channel::unbounded();
         let (post_tx, post_rx) = channel::unbounded();
         let (dereg_tx, dereg_rx) = channel::unbounded();
 
-        for _ in 0..CONCURRENT_REGISTRATIONS {
-            let pd = base.pd.clone();
+        for _ in 0..config.concurrency_reg {
+            let pd = client.pd.clone();
             let reg_rx = reg_rx.clone();
             let post_tx = post_tx.clone();
 
@@ -44,6 +46,7 @@ impl NonBlockingClient for Client {
                         id,
                         chunk,
                         state,
+                        remote,
                         bytes,
                     } = msg;
                     let mr = pd.register(bytes).unwrap();
@@ -56,6 +59,7 @@ impl NonBlockingClient for Client {
                         chunk,
                         state,
                         mr,
+                        remote,
                     };
                     trace!(message = ?msg, operation = "send", channel = "post");
                     post_tx.send(msg).unwrap()
@@ -74,17 +78,15 @@ impl NonBlockingClient for Client {
                     chunk,
                     state,
                     mr,
+                    remote,
                 }) = waiting.pop_front()
                 {
-                    let local = mr.slice_local(..);
-                    let remote = base
-                        .remote
-                        .slice(chunk * base.cfg.mr_size..(chunk + 1) * base.cfg.mr_size);
+                    let local = mr.slice_local(..).collect::<Vec<_>>();
                     let wr_id = encode_wr_id(id, chunk);
 
                     let mut posted = false;
-                    for qp in &mut base.qps {
-                        match unsafe { qp.post_read(&[local], remote, wr_id) } {
+                    for qp in &client.qps {
+                        match unsafe { qp.post_read(&local, remote, wr_id) } {
                             Ok(_) => {
                                 posted = true;
                                 break;
@@ -102,6 +104,7 @@ impl NonBlockingClient for Client {
                             chunk,
                             state,
                             mr,
+                            remote,
                         });
                     }
                 }
@@ -115,7 +118,7 @@ impl NonBlockingClient for Client {
                     _ => {}
                 }
 
-                for completion in base.cq.poll(&mut completions).unwrap() {
+                for completion in client.cq.poll(&mut completions).unwrap() {
                     assert!(completion.is_valid());
                     let wr_id = completion.wr_id();
 
@@ -137,7 +140,7 @@ impl NonBlockingClient for Client {
             }
         });
 
-        for _ in 0..CONCURRENT_DEREGISTRATIONS {
+        for _ in 0..config.concurrency_dereg {
             let dereg_rx = dereg_rx.clone();
 
             thread::spawn(move || {
@@ -156,16 +159,18 @@ impl NonBlockingClient for Client {
             });
         }
 
-        Ok(Self {
-            id,
-            reg_tx,
-            config: base.cfg,
-        })
+        Ok(Self { id, reg_tx, config })
     }
+}
 
-    fn request(&mut self, bytes: BytesMut) -> io::Result<RequestHandle> {
-        let chunk_size = self.config.mr_size;
-        assert_eq!(bytes.len() % chunk_size, 0);
+impl NonBlockingClient for Client {
+    fn prefetch(
+        &mut self,
+        bytes: BytesMut,
+        remote: RemoteMemorySlice,
+    ) -> io::Result<RequestHandle> {
+        assert_eq!(bytes.len(), remote.len());
+        let chunk_size = self.config.chunk_size;
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let chunks: Vec<_> = chunks_mut_exact(bytes, chunk_size).collect();
@@ -177,6 +182,7 @@ impl NonBlockingClient for Client {
                 id,
                 chunk,
                 state: handle.core.clone(),
+                remote: remote.slice(chunk * chunk_size..chunk * chunk_size + bytes.len()),
                 bytes,
             };
             trace!(message = ?msg, operation = "send", channel = "reg");
