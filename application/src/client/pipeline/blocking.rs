@@ -14,16 +14,16 @@ pub struct Client {
     config: Config,
 }
 
-impl Client {
-    pub fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+impl BlockingClient for Client {
+    type Config = Config;
+
+    fn new(client: BaseClient, config: Config) -> io::Result<Self> {
         Ok(Self {
             base: client,
             config,
         })
     }
-}
 
-impl BlockingClient for Client {
     fn fetch(&mut self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
         let chunk_size = self.config.chunk_size;
@@ -83,16 +83,20 @@ impl BlockingClient for Client {
             }
         }
 
-        let mut result = received
-            .remove(&0)
-            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
-
+        let Some(mut result) = received.remove(&0) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to reassemble bytes: missing chunk 0 of {}", total),
+            ));
+        };
         for i in 1..total {
-            if let Some(next) = received.remove(&i) {
-                result.unsplit(next);
-            } else {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-            }
+            let Some(bytes) = received.remove(&i) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to reassemble bytes: missing chunk {i} of {total}"),
+                ));
+            };
+            result.unsplit(bytes);
         }
 
         Ok(result)

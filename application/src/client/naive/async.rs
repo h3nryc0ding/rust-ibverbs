@@ -12,13 +12,17 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task;
 use tracing::trace;
 
+pub struct Config;
+
 pub struct Client {
     id: AtomicUsize,
     reg_tx: UnboundedSender<RegistrationMessage>,
 }
 
-impl Client {
-    pub async fn new(client: BaseClient) -> io::Result<Self> {
+impl AsyncClient for Client {
+    type Config = Config;
+
+    async fn new(client: BaseClient, _: Config) -> io::Result<Self> {
         let id = AtomicUsize::new(0);
 
         let (reg_tx, mut reg_rx) = mpsc::unbounded_channel();
@@ -130,21 +134,18 @@ impl Client {
                     let DeregistrationMessage { state, mr, .. } = msg;
 
                     let bytes = mr.deregister().unwrap();
-
+                    state.aggregator.bytes.insert(0, bytes);
                     state
                         .progress
                         .deregistered_copied
                         .fetch_add(1, Ordering::Relaxed);
-                    state.aggregator.bytes.insert(0, bytes);
                 });
             }
         });
 
         Ok(Self { id, reg_tx })
     }
-}
 
-impl AsyncClient for Client {
     async fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
         let id = self.id.fetch_add(1, Ordering::Relaxed);

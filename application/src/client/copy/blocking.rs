@@ -17,8 +17,10 @@ pub struct Client {
     config: Config,
 }
 
-impl Client {
-    pub fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+impl BlockingClient for Client {
+    type Config = Config;
+
+    fn new(client: BaseClient, config: Config) -> io::Result<Self> {
         let mut mrs = VecDeque::with_capacity(config.mr_count);
         for _ in 0..config.mr_count {
             loop {
@@ -39,9 +41,7 @@ impl Client {
             config,
         })
     }
-}
 
-impl BlockingClient for Client {
     fn fetch(&mut self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
         let chunk_size = self.config.mr_size;

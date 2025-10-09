@@ -3,17 +3,19 @@ use bytes::BytesMut;
 use ibverbs::{RemoteMemorySlice, ibv_wc};
 use std::io;
 
+pub struct Config;
+
 pub struct Client {
     base: BaseClient,
 }
 
-impl Client {
-    pub fn new(client: BaseClient) -> io::Result<Self> {
+impl BlockingClient for Client {
+    type Config = Config;
+
+    fn new(client: BaseClient, _: Config) -> io::Result<Self> {
         Ok(Self { base: client })
     }
-}
 
-impl BlockingClient for Client {
     fn fetch(&mut self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
 

@@ -1,7 +1,6 @@
-use application::args::bench_threaded;
-use application::client::BaseClient;
+use application::MI_B;
+use application::args::{DefaultCLI, bench_non_blocking};
 use application::client::pipeline::threaded::{Client, Config};
-use application::{MI_B, args};
 use clap::Parser;
 use std::io;
 
@@ -9,7 +8,7 @@ use std::io;
 #[command(author, version, about)]
 pub struct CLI {
     #[command(flatten)]
-    default: args::Args,
+    default: DefaultCLI,
 
     #[arg(long, default_value_t = 4 * MI_B)]
     chunk_size: usize,
@@ -24,16 +23,9 @@ pub struct CLI {
 fn main() -> io::Result<()> {
     let args = CLI::parse();
 
-    let client = BaseClient::new(args.default.addr)?;
-    let remotes = client.remotes();
-
     let config = Config::from(&args);
-    let mut client = Client::new(client, config)?;
-    let remote = remotes[0].slice(0..512 * MI_B);
-
-    bench_threaded(&mut client, &remote, &args.default)
+    bench_non_blocking::<Client>(&args.default, config)
 }
-
 impl From<&CLI> for Config {
     fn from(value: &CLI) -> Self {
         Self {

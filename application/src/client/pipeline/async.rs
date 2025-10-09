@@ -27,8 +27,10 @@ pub struct Client {
     config: Config,
 }
 
-impl Client {
-    pub async fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+impl AsyncClient for Client {
+    type Config = Config;
+
+    async fn new(client: BaseClient, config: Config) -> io::Result<Self> {
         let id = AtomicUsize::new(0);
 
         let (reg_tx, mut reg_rx) = mpsc::unbounded_channel();
@@ -148,20 +150,18 @@ impl Client {
                         chunk, state, mr, ..
                     } = msg;
                     let bytes = mr.deregister().unwrap();
+                    state.aggregator.bytes.insert(chunk, bytes);
                     state
                         .progress
                         .deregistered_copied
                         .fetch_add(1, Ordering::Relaxed);
-                    state.aggregator.bytes.insert(chunk, bytes);
                 });
             }
         });
 
         Ok(Self { id, reg_tx, config })
     }
-}
 
-impl AsyncClient for Client {
     async fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
         let chunk_size = self.config.chunk_size;

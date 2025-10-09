@@ -1,4 +1,4 @@
-use crate::client::{AsyncClient, BlockingClient, NonBlockingClient};
+use crate::client::{AsyncClient, BaseClient, BlockingClient, NonBlockingClient};
 use crate::{GI_B, MI_B, chunks_mut_exact};
 use bytes::BytesMut;
 use clap::Parser;
@@ -8,16 +8,16 @@ use std::net::IpAddr;
 use std::time::Instant;
 
 #[derive(Debug, Parser)]
-pub struct Args {
+pub struct DefaultCLI {
     pub addr: IpAddr,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     pub validate: bool,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     pub latency: bool,
 
-    #[arg(long, default_value_t = false)]
+    #[arg(long, default_value_t = true)]
     pub throughput: bool,
 
     #[arg(short, long, default_value_t = 1000)]
@@ -27,20 +27,73 @@ pub struct Args {
     pub size: usize,
 }
 
-pub fn bench_blocking<C: BlockingClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-    args: &Args,
-) -> io::Result<()> {
+pub fn bench_blocking<C: BlockingClient>(args: &DefaultCLI, config: C::Config) -> io::Result<()> {
+    init_tracing();
+
+    let client = BaseClient::new(args.addr)?;
+    let remotes = client.remotes();
+
+    let mut client = C::new(client, config)?;
+    let remote = remotes[0].slice(0..512 * MI_B);
+
     if args.latency {
-        latency_blocking(client, remote, args)?;
+        latency_blocking(&mut client, &remote, args)?;
     }
     if args.throughput {
-        throughput_blocking(client, remote, args)?;
+        throughput_blocking(&mut client, &remote, args)?;
     }
 
     if args.validate {
-        validate_blocking(client, remote)?;
+        validate_blocking(&mut client, &remote)?;
+    }
+
+    Ok(())
+}
+
+pub fn bench_non_blocking<C: NonBlockingClient>(
+    args: &DefaultCLI,
+    config: C::Config,
+) -> io::Result<()> {
+    init_tracing();
+
+    let client = BaseClient::new(args.addr)?;
+    let remotes = client.remotes();
+
+    let mut client = C::new(client, config)?;
+    let remote = remotes[0].slice(0..512 * MI_B);
+
+    if args.latency {
+        latency_threaded(&mut client, &remote, args)?;
+    }
+    if args.throughput {
+        throughput_threaded(&mut client, &remote, args)?;
+    }
+
+    if args.validate {
+        validate_threaded(&mut client, &remote)?;
+    }
+
+    Ok(())
+}
+
+pub async fn bench_async<C: AsyncClient>(args: &DefaultCLI, config: C::Config) -> io::Result<()> {
+    init_tracing();
+
+    let client = BaseClient::new(args.addr)?;
+    let remotes = client.remotes();
+
+    let mut client = C::new(client, config).await?;
+    let remote = remotes[0].slice(0..512 * MI_B);
+
+    if args.latency {
+        latency_async(&mut client, &remote, args).await?;
+    }
+    if args.throughput {
+        throughput_async(&mut client, &remote, args).await?;
+    }
+
+    if args.validate {
+        validate_async(&mut client, &remote).await?;
     }
 
     Ok(())
@@ -49,7 +102,7 @@ pub fn bench_blocking<C: BlockingClient>(
 fn latency_blocking<C: BlockingClient>(
     client: &mut C,
     remote: &RemoteMemorySlice,
-    args: &Args,
+    args: &DefaultCLI,
 ) -> io::Result<()> {
     let mut latencies = Vec::with_capacity(args.iterations);
     for _ in 0..args.iterations {
@@ -69,7 +122,7 @@ fn latency_blocking<C: BlockingClient>(
 fn throughput_blocking<C: BlockingClient>(
     client: &mut C,
     remote: &RemoteMemorySlice,
-    args: &Args,
+    args: &DefaultCLI,
 ) -> io::Result<()> {
     let bytes = BytesMut::zeroed(args.size * args.iterations);
 
@@ -96,29 +149,10 @@ fn validate_blocking<C: BlockingClient>(
     Ok(())
 }
 
-pub fn bench_threaded<C: NonBlockingClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-    args: &Args,
-) -> io::Result<()> {
-    if args.latency {
-        latency_threaded(client, remote, args)?;
-    }
-    if args.throughput {
-        throughput_threaded(client, remote, args)?;
-    }
-
-    if args.validate {
-        validate_threaded(client, remote)?;
-    }
-
-    Ok(())
-}
-
 fn latency_threaded<C: NonBlockingClient>(
     client: &mut C,
     remote: &RemoteMemorySlice,
-    args: &Args,
+    args: &DefaultCLI,
 ) -> io::Result<()> {
     let mut latencies = Vec::with_capacity(args.iterations);
     for _ in 0..args.iterations {
@@ -138,7 +172,7 @@ fn latency_threaded<C: NonBlockingClient>(
 fn throughput_threaded<C: NonBlockingClient>(
     client: &mut C,
     remote: &RemoteMemorySlice,
-    args: &Args,
+    args: &DefaultCLI,
 ) -> io::Result<()> {
     let bytes = BytesMut::zeroed(args.size * args.iterations);
     let mut handles = Vec::with_capacity(args.iterations);
@@ -169,29 +203,10 @@ fn validate_threaded<C: NonBlockingClient>(
     Ok(())
 }
 
-pub async fn bench_async<C: AsyncClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-    args: &Args,
-) -> io::Result<()> {
-    if args.latency {
-        latency_async(client, remote, args).await?;
-    }
-    if args.throughput {
-        throughput_async(client, remote, args).await?;
-    }
-
-    if args.validate {
-        validate_async(client, remote).await?;
-    }
-
-    Ok(())
-}
-
 async fn latency_async<C: AsyncClient>(
     client: &mut C,
     remote: &RemoteMemorySlice,
-    args: &Args,
+    args: &DefaultCLI,
 ) -> io::Result<()> {
     let mut latencies = Vec::with_capacity(args.iterations);
     for _ in 0..args.iterations {
@@ -211,7 +226,7 @@ async fn latency_async<C: AsyncClient>(
 async fn throughput_async<C: AsyncClient>(
     client: &mut C,
     remote: &RemoteMemorySlice,
-    args: &Args,
+    args: &DefaultCLI,
 ) -> io::Result<()> {
     let bytes = BytesMut::zeroed(args.size * args.iterations);
     let mut futures = Vec::with_capacity(args.iterations);
@@ -288,4 +303,12 @@ fn validate(bytes: &[u8]) -> io::Result<()> {
     }
     println!("Validation passed with {} bytes", bytes.len());
     Ok(())
+}
+
+fn init_tracing() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_thread_ids(true)
+        .compact()
+        .init();
 }

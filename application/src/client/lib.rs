@@ -116,28 +116,31 @@ impl RequestHandle {
     }
 
     pub fn wait(self) -> io::Result<BytesMut> {
+        let chunks = self.core.aggregator.chunks;
         while self
             .core
             .progress
             .deregistered_copied
             .load(Ordering::Relaxed)
-            < self.core.aggregator.chunks
+            < chunks
         {
             hint::spin_loop();
         }
-        let (_, mut result) = self
-            .core
-            .aggregator
-            .bytes
-            .remove(&0)
-            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))?;
 
-        for i in 1..self.core.aggregator.chunks {
-            if let Some((_, bytes)) = self.core.aggregator.bytes.remove(&i) {
-                result.unsplit(bytes);
-            } else {
-                return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
-            }
+        let Some((_, mut result)) = self.core.aggregator.bytes.remove(&0) else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to reassemble bytes: missing chunk 0 of {}", chunks),
+            ));
+        };
+        for i in 1..chunks {
+            let Some((_, bytes)) = self.core.aggregator.bytes.remove(&i) else {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Failed to reassemble bytes: missing chunk {i} of {chunks}"),
+                ));
+            };
+            result.unsplit(bytes);
         }
 
         Ok(result)

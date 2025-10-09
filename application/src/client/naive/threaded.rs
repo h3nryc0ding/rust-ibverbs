@@ -19,8 +19,10 @@ pub struct Client {
     reg_tx: Sender<RegistrationMessage>,
 }
 
-impl Client {
-    pub fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+impl NonBlockingClient for Client {
+    type Config = Config;
+
+    fn new(client: BaseClient, config: Config) -> io::Result<Self> {
         let id = AtomicUsize::new(0);
 
         let (reg_tx, reg_rx) = channel::unbounded();
@@ -134,21 +136,18 @@ impl Client {
                     let DeregistrationMessage { state, mr, .. } = msg;
 
                     let bytes = mr.deregister().unwrap();
-
+                    state.aggregator.bytes.insert(0, bytes);
                     state
                         .progress
                         .deregistered_copied
                         .fetch_add(1, Ordering::Relaxed);
-                    state.aggregator.bytes.insert(0, bytes);
                 }
             });
         }
 
         Ok(Self { id, reg_tx })
     }
-}
 
-impl NonBlockingClient for Client {
     fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<RequestHandle> {
         assert_eq!(bytes.len(), remote.len());
 

@@ -27,8 +27,10 @@ pub struct Client {
     config: Config,
 }
 
-impl Client {
-    pub async fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+impl AsyncClient for Client {
+    type Config = Config;
+
+    async fn new(client: BaseClient, config: Config) -> io::Result<Self> {
         pin_thread_to_node::<NUMA_NODE>()?;
 
         let id = AtomicUsize::new(0);
@@ -154,11 +156,11 @@ impl Client {
                     let dst_slice = bytes.as_mut();
                     dst_slice.copy_from_slice(src_slice);
 
+                    state.aggregator.bytes.insert(chunk, bytes);
                     state
                         .progress
                         .deregistered_copied
                         .fetch_add(1, Ordering::Relaxed);
-                    state.aggregator.bytes.insert(chunk, bytes);
 
                     let msg = MRMessage { 0: mr };
                     trace!(message = ?msg, operation = "send", channel = "mr");
@@ -173,9 +175,7 @@ impl Client {
             config,
         })
     }
-}
 
-impl AsyncClient for Client {
     async fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
         let mr_size = self.config.mr_size;

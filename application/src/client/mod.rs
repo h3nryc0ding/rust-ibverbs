@@ -19,15 +19,21 @@ pub struct BaseClient {
     pub(crate) remotes: Vec<RemoteMemorySlice>,
 }
 
-pub trait BlockingClient {
+pub trait BlockingClient: Sized {
+    type Config;
+    fn new(c: BaseClient, config: Self::Config) -> io::Result<Self>;
     fn fetch(&mut self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut>;
 }
 
-pub trait NonBlockingClient {
+pub trait NonBlockingClient: Sized {
+    type Config;
+    fn new(c: BaseClient, config: Self::Config) -> io::Result<Self>;
     fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<RequestHandle>;
 }
 
-pub trait AsyncClient {
+pub trait AsyncClient: Sized {
+    type Config;
+    fn new(c: BaseClient, config: Self::Config) -> impl Future<Output = io::Result<Self>>;
     fn prefetch(
         &self,
         bytes: BytesMut,
