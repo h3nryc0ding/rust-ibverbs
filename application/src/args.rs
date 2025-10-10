@@ -105,15 +105,19 @@ fn latency_blocking<C: BlockingClient>(
     args: &DefaultCLI,
 ) -> io::Result<()> {
     let mut latencies = Vec::with_capacity(args.iterations);
+    let mut results = Vec::with_capacity(args.iterations);
+
     for _ in 0..args.iterations {
         let bytes = BytesMut::zeroed(args.size);
 
         let start = Instant::now();
-        let _ = client.fetch(bytes, remote)?;
+        let res = client.fetch(bytes, remote)?;
         let end = Instant::now();
 
+        results.push(res);
         latencies.push(end - start);
     }
+    drop(results);
 
     print_latency(&latencies);
     Ok(())
@@ -125,12 +129,16 @@ fn throughput_blocking<C: BlockingClient>(
     args: &DefaultCLI,
 ) -> io::Result<()> {
     let bytes = BytesMut::zeroed(args.size * args.iterations);
+    let mut results = Vec::with_capacity(args.iterations);
 
     let start = Instant::now();
     for bytes in chunks_mut_exact(bytes, args.size) {
-        let _ = client.fetch(bytes, remote)?;
+        let res = client.fetch(bytes, remote)?;
+
+        results.push(res);
     }
     let end = Instant::now();
+    drop(results);
 
     print_throughput(args.size as f64 * args.iterations as f64, end - start);
     Ok(())
@@ -155,15 +163,19 @@ fn latency_threaded<C: NonBlockingClient>(
     args: &DefaultCLI,
 ) -> io::Result<()> {
     let mut latencies = Vec::with_capacity(args.iterations);
+    let mut results = Vec::with_capacity(args.iterations);
+
     for _ in 0..args.iterations {
         let bytes = BytesMut::zeroed(args.size);
 
         let start = Instant::now();
-        let _ = client.prefetch(bytes, remote)?.wait();
+        let res = client.prefetch(bytes, remote)?.wait();
         let end = Instant::now();
 
+        results.push(res);
         latencies.push(end - start);
     }
+    drop(results);
 
     print_latency(&latencies);
     Ok(())
@@ -176,15 +188,19 @@ fn throughput_threaded<C: NonBlockingClient>(
 ) -> io::Result<()> {
     let bytes = BytesMut::zeroed(args.size * args.iterations);
     let mut handles = Vec::with_capacity(args.iterations);
+    let mut results = Vec::with_capacity(args.iterations);
 
     let start = Instant::now();
     for bytes in chunks_mut_exact(bytes, args.size) {
         handles.push(client.prefetch(bytes, remote)?);
     }
     for handle in handles {
-        handle.wait()?;
+        let res = handle.wait()?;
+
+        results.push(res);
     }
     let end = Instant::now();
+    drop(results);
 
     print_throughput(args.iterations as f64 * args.size as f64, end - start);
     Ok(())
@@ -209,15 +225,19 @@ async fn latency_async<C: AsyncClient>(
     args: &DefaultCLI,
 ) -> io::Result<()> {
     let mut latencies = Vec::with_capacity(args.iterations);
+    let mut results = Vec::with_capacity(args.iterations);
+
     for _ in 0..args.iterations {
         let bytes = BytesMut::zeroed(args.size);
 
         let start = Instant::now();
-        let _ = client.prefetch(bytes, remote).await?;
+        let res = client.prefetch(bytes, remote).await?;
         let end = Instant::now();
 
+        results.push(res);
         latencies.push(end - start);
     }
+    drop(results);
 
     print_latency(&latencies);
     Ok(())
@@ -235,8 +255,9 @@ async fn throughput_async<C: AsyncClient>(
     for bytes in chunks_mut_exact(bytes, args.size) {
         futures.push(client.prefetch(bytes, remote));
     }
-    futures::future::join_all(futures).await;
+    let results = futures::future::join_all(futures).await;
     let end = Instant::now();
+    drop(results);
 
     print_throughput(args.size as f64 * args.iterations as f64, end - start);
     Ok(())
