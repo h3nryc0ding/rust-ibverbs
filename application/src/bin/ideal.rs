@@ -1,8 +1,7 @@
 use application::MI_B;
 use application::args::{DefaultCLI, bench_blocking};
-use application::client::ideal;
+use application::client::ideal::{Client, Config};
 use clap::Parser;
-use ideal::{Client, Config};
 use std::io;
 
 #[derive(Debug, Parser)]

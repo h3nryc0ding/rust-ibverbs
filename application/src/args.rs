@@ -11,14 +11,14 @@ use std::time::Instant;
 pub struct DefaultCLI {
     pub addr: IpAddr,
 
-    #[arg(long, default_value_t = true)]
-    pub validate: bool,
+    #[arg(long, default_value_t = false)]
+    pub skip_validation: bool,
 
-    #[arg(long, default_value_t = true)]
-    pub latency: bool,
+    #[arg(long, default_value_t = false)]
+    pub skip_latency: bool,
 
-    #[arg(long, default_value_t = true)]
-    pub throughput: bool,
+    #[arg(long, default_value_t = false)]
+    pub skip_throughput: bool,
 
     #[arg(short, long, default_value_t = 1000)]
     pub iterations: usize,
@@ -36,14 +36,14 @@ pub fn bench_blocking<C: BlockingClient>(args: &DefaultCLI, config: C::Config) -
     let mut client = C::new(client, config)?;
     let remote = remotes[0].slice(0..512 * MI_B);
 
-    if args.latency {
+    if !args.skip_latency {
         latency_blocking(&mut client, &remote, args)?;
     }
-    if args.throughput {
+    if !args.skip_throughput {
         throughput_blocking(&mut client, &remote, args)?;
     }
 
-    if args.validate {
+    if !args.skip_validation {
         validate_blocking(&mut client, &remote)?;
     }
 
@@ -62,14 +62,14 @@ pub fn bench_non_blocking<C: NonBlockingClient>(
     let mut client = C::new(client, config)?;
     let remote = remotes[0].slice(0..512 * MI_B);
 
-    if args.latency {
+    if !args.skip_latency {
         latency_threaded(&mut client, &remote, args)?;
     }
-    if args.throughput {
+    if !args.skip_throughput {
         throughput_threaded(&mut client, &remote, args)?;
     }
 
-    if args.validate {
+    if !args.skip_validation {
         validate_threaded(&mut client, &remote)?;
     }
 
@@ -85,14 +85,14 @@ pub async fn bench_async<C: AsyncClient>(args: &DefaultCLI, config: C::Config) -
     let mut client = C::new(client, config).await?;
     let remote = remotes[0].slice(0..512 * MI_B);
 
-    if args.latency {
+    if !args.skip_latency {
         latency_async(&mut client, &remote, args).await?;
     }
-    if args.throughput {
+    if !args.skip_throughput {
         throughput_async(&mut client, &remote, args).await?;
     }
 
-    if args.validate {
+    if !args.skip_validation {
         validate_async(&mut client, &remote).await?;
     }
 
