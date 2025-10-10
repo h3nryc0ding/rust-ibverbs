@@ -1,4 +1,4 @@
-use application::KI_B;
+use application::MI_B;
 use application::args::{DefaultCLI, bench_blocking};
 use application::client::pipeline::blocking::{Client, Config};
 use clap::Parser;
@@ -10,7 +10,7 @@ pub struct CLI {
     #[command(flatten)]
     default: DefaultCLI,
 
-    #[arg(long, default_value_t = 4 * KI_B)]
+    #[arg(long, default_value_t = 4 * MI_B)]
     chunk_size: usize,
 }
 
