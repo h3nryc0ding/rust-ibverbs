@@ -1,6 +1,6 @@
-use super::lib::{CopyMessage, MRMessage, Pending, PostMessage};
+use super::lib::{CopyMessage, Handle, MRMessage, Pending, PostMessage};
 use crate::client::{
-    BaseClient, NUMA_NODE, NonBlockingClient, RequestHandle,
+    BaseClient, NUMA_NODE, NonBlockingClient,
     lib::{decode_wr_id, encode_wr_id},
 };
 use crate::{chunks_mut_exact, pin_thread_to_node};
@@ -28,6 +28,7 @@ pub struct Client {
 
 impl NonBlockingClient for Client {
     type Config = Config;
+    type Handle = Handle;
 
     fn new(client: BaseClient, config: Config) -> io::Result<Self> {
         pin_thread_to_node::<NUMA_NODE>()?;
@@ -110,7 +111,7 @@ impl NonBlockingClient for Client {
                             bytes,
                         })
                     } else {
-                        state.progress.posted.fetch_add(1, Ordering::Relaxed);
+                        state.posted.fetch_add(1, Ordering::Relaxed);
                         pending.insert(wr_id, Pending { state, mr, bytes });
                     }
                 }
@@ -121,7 +122,7 @@ impl NonBlockingClient for Client {
 
                     if let Some(Pending { state, mr, bytes }) = pending.remove(&wr_id) {
                         let (id, chunk) = decode_wr_id(wr_id);
-                        state.progress.received.fetch_add(1, Ordering::Relaxed);
+                        state.received.fetch_add(1, Ordering::Relaxed);
 
                         let msg = CopyMessage {
                             id,
@@ -157,11 +158,8 @@ impl NonBlockingClient for Client {
                     let dst_slice = bytes.as_mut();
                     dst_slice.copy_from_slice(src_slice);
 
-                    state.aggregator.bytes.insert(chunk, bytes);
-                    state
-                        .progress
-                        .deregistered_copied
-                        .fetch_add(1, Ordering::Relaxed);
+                    state.bytes.insert(chunk, bytes);
+                    state.copied.fetch_add(1, Ordering::Relaxed);
 
                     let msg = MRMessage { 0: mr };
                     trace!(message = ?msg, operation = "send", channel = "mr");
@@ -177,20 +175,20 @@ impl NonBlockingClient for Client {
         })
     }
 
-    fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<RequestHandle> {
+    fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<Self::Handle> {
         assert_eq!(bytes.len(), remote.len());
         let mr_size = self.config.mr_size;
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let chunks: Vec<_> = chunks_mut_exact(bytes, mr_size).collect();
 
-        let handle = RequestHandle::new(chunks.len());
+        let handle = Handle::new(chunks.len());
 
         for (chunk, bytes) in chunks.into_iter().enumerate() {
             let msg = PostMessage {
                 id,
                 chunk,
-                state: handle.core.clone(),
+                state: handle.state.clone(),
                 remote: remote.slice(chunk * mr_size..chunk * mr_size + bytes.len()),
                 bytes,
             };

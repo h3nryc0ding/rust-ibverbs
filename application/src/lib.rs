@@ -7,7 +7,7 @@ use hwlocality::memory::binding::{MemoryBindingFlags, MemoryBindingPolicy};
 use hwlocality::object::depth::Depth;
 use std::{io, iter};
 
-pub mod args;
+pub mod bench;
 pub mod client;
 pub mod server;
 
@@ -58,4 +58,18 @@ pub fn chunks_mut_exact(mut buf: BytesMut, chunk_size: usize) -> impl Iterator<I
             Some(buf.split_to(chunk_size))
         }
     })
+}
+
+pub fn chunks_unsplit(mut chunks: impl Iterator<Item = BytesMut>) -> io::Result<BytesMut> {
+    let Some(mut result) = chunks.next() else {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Failed to reassemble bytes: no chunks provided".to_string(),
+        ));
+    };
+    for chunk in chunks {
+        result.unsplit(chunk);
+    }
+
+    Ok(result)
 }

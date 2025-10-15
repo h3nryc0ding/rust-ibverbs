@@ -1,4 +1,4 @@
-use application::args::{DefaultCLI, bench_blocking};
+use application::bench::{DefaultCLI, bench_blocking};
 use application::client::naive;
 use clap::Parser;
 use naive::blocking::{Client, Config};

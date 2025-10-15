@@ -1,4 +1,4 @@
-use crate::client::{AsyncClient, BaseClient, BlockingClient, NonBlockingClient};
+use crate::client::{AsyncClient, BaseClient, BlockingClient, NonBlockingClient, RequestHandle};
 use crate::{GI_B, MI_B, chunks_mut_exact};
 use bytes::BytesMut;
 use clap::Parser;
@@ -163,19 +163,20 @@ fn latency_threaded<C: NonBlockingClient>(
     args: &DefaultCLI,
 ) -> io::Result<()> {
     let mut latencies = Vec::with_capacity(args.iterations);
-    let mut results = Vec::with_capacity(args.iterations);
+    let mut handles = Vec::with_capacity(args.iterations);
 
     for _ in 0..args.iterations {
         let bytes = BytesMut::zeroed(args.size);
 
         let start = Instant::now();
-        let res = client.prefetch(bytes, remote)?.wait();
+        let handle = client.prefetch(bytes, remote)?;
+        handle.wait_available();
         let end = Instant::now();
 
-        results.push(res);
+        handles.push(handle);
         latencies.push(end - start);
     }
-    drop(results);
+    drop(handles);
 
     print_latency(&latencies);
     Ok(())
@@ -188,19 +189,16 @@ fn throughput_threaded<C: NonBlockingClient>(
 ) -> io::Result<()> {
     let bytes = BytesMut::zeroed(args.size * args.iterations);
     let mut handles = Vec::with_capacity(args.iterations);
-    let mut results = Vec::with_capacity(args.iterations);
 
     let start = Instant::now();
     for bytes in chunks_mut_exact(bytes, args.size) {
         handles.push(client.prefetch(bytes, remote)?);
     }
-    for handle in handles {
-        let res = handle.wait()?;
-
-        results.push(res);
+    for handle in &handles {
+        handle.wait_available();
     }
     let end = Instant::now();
-    drop(results);
+    drop(handles);
 
     print_throughput(args.iterations as f64 * args.size as f64, end - start);
     Ok(())
@@ -213,7 +211,7 @@ fn validate_threaded<C: NonBlockingClient>(
     let size = remote.len();
 
     let bytes = BytesMut::zeroed(size);
-    let result = client.prefetch(bytes, remote)?.wait()?;
+    let result = client.prefetch(bytes, remote)?.acquire()?;
 
     validate(&result)?;
     Ok(())

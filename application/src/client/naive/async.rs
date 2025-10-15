@@ -1,4 +1,4 @@
-use super::lib::{DeregistrationMessage, Pending, PostMessage, RegistrationMessage};
+use super::lib::{DeregistrationMessage, Handle, Pending, PostMessage, RegistrationMessage};
 use crate::client::{AsyncClient, BaseClient, RequestHandle};
 use bytes::BytesMut;
 use ibverbs::{RemoteMemorySlice, ibv_wc};
@@ -45,10 +45,7 @@ impl AsyncClient for Client {
                     } = msg;
 
                     let mr = pd.register(bytes).unwrap();
-                    state
-                        .progress
-                        .registered_acquired
-                        .fetch_add(1, Ordering::Relaxed);
+                    state.registered.store(true, Ordering::Release);
 
                     let msg = PostMessage {
                         id,
@@ -89,7 +86,7 @@ impl AsyncClient for Client {
                         }
                     }
                     if posted {
-                        state.progress.posted.fetch_add(1, Ordering::Relaxed);
+                        state.posted.store(true, Ordering::Release);
                         pending.insert(id, Pending { state, mr });
                     } else {
                         waiting.push_front(PostMessage {
@@ -115,7 +112,7 @@ impl AsyncClient for Client {
                     let id = completion.wr_id() as usize;
 
                     if let Some(Pending { state, mr }) = pending.remove(&id) {
-                        state.progress.received.fetch_add(1, Ordering::Relaxed);
+                        state.received.store(true, Ordering::Release);
 
                         let msg = DeregistrationMessage { id, state, mr };
                         trace!(message = ?msg, operation = "send", channel = "dereg");
@@ -134,11 +131,8 @@ impl AsyncClient for Client {
                     let DeregistrationMessage { state, mr, .. } = msg;
 
                     let bytes = mr.deregister().unwrap();
-                    state.aggregator.bytes.insert(0, bytes);
-                    state
-                        .progress
-                        .deregistered_copied
-                        .fetch_add(1, Ordering::Relaxed);
+                    state.bytes.lock().unwrap().replace(bytes);
+                    state.deregistered.store(true, Ordering::Release);
                 });
             }
         });
@@ -150,17 +144,17 @@ impl AsyncClient for Client {
         assert_eq!(bytes.len(), remote.len());
         let id = self.id.fetch_add(1, Ordering::Relaxed);
 
-        let handle = RequestHandle::new(1);
+        let handle = Handle::default();
 
         let msg = RegistrationMessage {
             id,
-            state: handle.core.clone(),
+            state: handle.state.clone(),
             bytes,
             remote: remote.slice(..),
         };
         trace!(message = ?msg, operation = "send", channel = "reg");
         self.reg_tx.send(msg).unwrap();
 
-        handle.wait() // TODO: no fire and forget
+        task::spawn_blocking(move || handle.acquire()).await?
     }
 }

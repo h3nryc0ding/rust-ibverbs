@@ -1,32 +1,65 @@
-use crate::client::lib::RequestCore;
+use crate::client::RequestHandle;
 use bytes::BytesMut;
 use ibverbs::{MemoryRegion, RemoteMemorySlice};
-use std::fmt;
 use std::fmt::{Debug, Formatter};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::{fmt, io};
+
+#[derive(Default)]
+pub struct Handle {
+    pub(crate) state: Arc<State>,
+}
+
+#[derive(Default)]
+pub(crate) struct State {
+    pub(crate) bytes: Mutex<Option<BytesMut>>,
+
+    pub(crate) registered: AtomicBool,
+    pub(crate) posted: AtomicBool,
+    pub(crate) received: AtomicBool,
+    pub(crate) deregistered: AtomicBool,
+}
+
+impl RequestHandle for Handle {
+    fn is_available(&self) -> bool {
+        self.state.received.load(Ordering::Acquire)
+    }
+
+    fn is_acquirable(&self) -> bool {
+        self.state.deregistered.load(Ordering::Acquire)
+    }
+
+    fn acquire(self) -> io::Result<BytesMut> {
+        self.wait_acquirable();
+        let mut bytes = self.state.bytes.lock().unwrap();
+
+        Ok(bytes.take().unwrap())
+    }
+}
 
 pub(crate) struct Pending {
-    pub(crate) state: Arc<RequestCore>,
+    pub(crate) state: Arc<State>,
     pub(crate) mr: MemoryRegion,
 }
 
 pub(crate) struct RegistrationMessage {
     pub(crate) id: usize,
-    pub(crate) state: Arc<RequestCore>,
+    pub(crate) state: Arc<State>,
     pub(crate) bytes: BytesMut,
     pub(crate) remote: RemoteMemorySlice,
 }
 
 pub(crate) struct PostMessage {
     pub(crate) id: usize,
-    pub(crate) state: Arc<RequestCore>,
+    pub(crate) state: Arc<State>,
     pub(crate) mr: MemoryRegion,
     pub(crate) remote: RemoteMemorySlice,
 }
 
 pub(crate) struct DeregistrationMessage {
     pub(crate) id: usize,
-    pub(crate) state: Arc<RequestCore>,
+    pub(crate) state: Arc<State>,
     pub(crate) mr: MemoryRegion,
 }
 

@@ -1,4 +1,4 @@
-use super::lib::{CopyMessage, MRMessage, Pending, PostMessage};
+use super::lib::{CopyMessage, Handle, MRMessage, Pending, PostMessage};
 use crate::client::{
     AsyncClient, BaseClient, NUMA_NODE, RequestHandle,
     lib::{decode_wr_id, encode_wr_id},
@@ -111,7 +111,7 @@ impl AsyncClient for Client {
                             bytes,
                         })
                     } else {
-                        state.progress.posted.fetch_add(1, Ordering::Relaxed);
+                        state.posted.fetch_add(1, Ordering::Relaxed);
                         pending.insert(wr_id, Pending { state, mr, bytes });
                     }
                 }
@@ -122,7 +122,7 @@ impl AsyncClient for Client {
 
                     if let Some(Pending { state, mr, bytes }) = pending.remove(&wr_id) {
                         let (id, chunk) = decode_wr_id(wr_id);
-                        state.progress.received.fetch_add(1, Ordering::Relaxed);
+                        state.received.fetch_add(1, Ordering::Relaxed);
 
                         let msg = CopyMessage {
                             id,
@@ -156,11 +156,8 @@ impl AsyncClient for Client {
                     let dst_slice = bytes.as_mut();
                     dst_slice.copy_from_slice(src_slice);
 
-                    state.aggregator.bytes.insert(chunk, bytes);
-                    state
-                        .progress
-                        .deregistered_copied
-                        .fetch_add(1, Ordering::Relaxed);
+                    state.bytes.insert(chunk, bytes);
+                    state.copied.fetch_add(1, Ordering::Relaxed);
 
                     let msg = MRMessage { 0: mr };
                     trace!(message = ?msg, operation = "send", channel = "mr");
@@ -183,13 +180,13 @@ impl AsyncClient for Client {
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let chunks: Vec<_> = chunks_mut_exact(bytes, mr_size).collect();
 
-        let handle = RequestHandle::new(chunks.len());
+        let handle = Handle::new(chunks.len());
 
         for (chunk, bytes) in chunks.into_iter().enumerate() {
             let msg = PostMessage {
                 id,
                 chunk,
-                state: handle.core.clone(),
+                state: handle.state.clone(),
                 remote: remote.slice(chunk * mr_size..chunk * mr_size + bytes.len()),
                 bytes,
             };
@@ -197,6 +194,6 @@ impl AsyncClient for Client {
             self.post_tx.send(msg).unwrap()
         }
 
-        handle.wait() // TODO: no fire and forget
+        task::spawn_blocking(move || handle.acquire()).await?
     }
 }

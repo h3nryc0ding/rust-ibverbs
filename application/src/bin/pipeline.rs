@@ -1,5 +1,5 @@
 use application::MI_B;
-use application::args::{DefaultCLI, bench_blocking};
+use application::bench::{DefaultCLI, bench_blocking};
 use application::client::pipeline::blocking::{Client, Config};
 use clap::Parser;
 use std::io;

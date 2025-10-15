@@ -1,5 +1,5 @@
 use application::MI_B;
-use application::args::{DefaultCLI, bench_async};
+use application::bench::{DefaultCLI, bench_async};
 use application::client::naive::r#async::{Client, Config};
 use clap::Parser;
 use std::io;

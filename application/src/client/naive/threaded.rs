@@ -1,5 +1,5 @@
-use super::lib::{DeregistrationMessage, Pending, PostMessage, RegistrationMessage};
-use crate::client::{BaseClient, NonBlockingClient, RequestHandle};
+use super::lib::{DeregistrationMessage, Handle, Pending, PostMessage, RegistrationMessage};
+use crate::client::{BaseClient, NonBlockingClient};
 use bytes::BytesMut;
 use crossbeam::channel;
 use crossbeam::channel::{Sender, TryRecvError};
@@ -21,6 +21,7 @@ pub struct Client {
 
 impl NonBlockingClient for Client {
     type Config = Config;
+    type Handle = Handle;
 
     fn new(client: BaseClient, config: Config) -> io::Result<Self> {
         let id = AtomicUsize::new(0);
@@ -45,10 +46,7 @@ impl NonBlockingClient for Client {
                     } = msg;
 
                     let mr = pd.register(bytes).unwrap();
-                    state
-                        .progress
-                        .registered_acquired
-                        .fetch_add(1, Ordering::Relaxed);
+                    state.registered.store(true, Ordering::Release);
 
                     let msg = PostMessage {
                         id,
@@ -89,7 +87,7 @@ impl NonBlockingClient for Client {
                         }
                     }
                     if posted {
-                        state.progress.posted.fetch_add(1, Ordering::Relaxed);
+                        state.posted.store(true, Ordering::Release);
                         pending.insert(id, Pending { state, mr });
                     } else {
                         waiting.push_front(PostMessage {
@@ -115,7 +113,7 @@ impl NonBlockingClient for Client {
                     let id = completion.wr_id() as usize;
 
                     if let Some(Pending { state, mr }) = pending.remove(&id) {
-                        state.progress.received.fetch_add(1, Ordering::Relaxed);
+                        state.received.store(true, Ordering::Release);
 
                         let msg = DeregistrationMessage { id, state, mr };
                         trace!(message = ?msg, operation = "send", channel = "dereg");
@@ -136,11 +134,8 @@ impl NonBlockingClient for Client {
                     let DeregistrationMessage { state, mr, .. } = msg;
 
                     let bytes = mr.deregister().unwrap();
-                    state.aggregator.bytes.insert(0, bytes);
-                    state
-                        .progress
-                        .deregistered_copied
-                        .fetch_add(1, Ordering::Relaxed);
+                    state.bytes.lock().unwrap().replace(bytes);
+                    state.deregistered.store(true, Ordering::Release);
                 }
             });
         }
@@ -148,16 +143,15 @@ impl NonBlockingClient for Client {
         Ok(Self { id, reg_tx })
     }
 
-    fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<RequestHandle> {
+    fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<Self::Handle> {
         assert_eq!(bytes.len(), remote.len());
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
-
-        let handle = RequestHandle::new(1);
+        let handle = Handle::default();
 
         let msg = RegistrationMessage {
             id,
-            state: handle.core.clone(),
+            state: handle.state.clone(),
             bytes,
             remote: remote.slice(..),
         };

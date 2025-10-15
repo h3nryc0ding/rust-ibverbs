@@ -1,7 +1,7 @@
-use super::lib::{DeregistrationMessage, PostMessage, RegistrationMessage};
+use super::lib::{DeregistrationMessage, Handle, Pending, PostMessage, RegistrationMessage};
 use crate::chunks_mut_exact;
 use crate::client::{
-    BaseClient, NonBlockingClient, RequestHandle,
+    BaseClient, NonBlockingClient,
     lib::{decode_wr_id, encode_wr_id},
 };
 use bytes::BytesMut;
@@ -28,6 +28,7 @@ pub struct Client {
 
 impl NonBlockingClient for Client {
     type Config = Config;
+    type Handle = Handle;
 
     fn new(client: BaseClient, config: Config) -> io::Result<Self> {
         let id = AtomicUsize::new(0);
@@ -52,10 +53,7 @@ impl NonBlockingClient for Client {
                         bytes,
                     } = msg;
                     let mr = pd.register(bytes).unwrap();
-                    state
-                        .progress
-                        .registered_acquired
-                        .fetch_add(1, Ordering::Relaxed);
+                    state.registered.fetch_add(1, Ordering::Relaxed);
                     let msg = PostMessage {
                         id,
                         chunk,
@@ -98,8 +96,8 @@ impl NonBlockingClient for Client {
                         }
                     }
                     if posted {
-                        state.progress.posted.fetch_add(1, Ordering::Relaxed);
-                        pending.insert(wr_id, (state, mr));
+                        state.posted.fetch_add(1, Ordering::Relaxed);
+                        pending.insert(wr_id, Pending { state, mr });
                     } else {
                         waiting.push_front(PostMessage {
                             id,
@@ -124,9 +122,9 @@ impl NonBlockingClient for Client {
                     assert!(completion.is_valid());
                     let wr_id = completion.wr_id();
 
-                    if let Some((state, mr)) = pending.remove(&wr_id) {
+                    if let Some(Pending { state, mr }) = pending.remove(&wr_id) {
                         let (id, chunk) = decode_wr_id(wr_id);
-                        state.progress.received.fetch_add(1, Ordering::Relaxed);
+                        state.received.fetch_add(1, Ordering::Relaxed);
                         let msg = DeregistrationMessage {
                             id,
                             chunk,
@@ -152,11 +150,8 @@ impl NonBlockingClient for Client {
                         chunk, state, mr, ..
                     } = msg;
                     let bytes = mr.deregister().unwrap();
-                    state.aggregator.bytes.insert(chunk, bytes);
-                    state
-                        .progress
-                        .deregistered_copied
-                        .fetch_add(1, Ordering::Relaxed);
+                    state.bytes.insert(chunk, bytes);
+                    state.deregistered.fetch_add(1, Ordering::Relaxed);
                 }
             });
         }
@@ -164,20 +159,20 @@ impl NonBlockingClient for Client {
         Ok(Self { id, reg_tx, config })
     }
 
-    fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<RequestHandle> {
+    fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<Self::Handle> {
         assert_eq!(bytes.len(), remote.len());
         let chunk_size = self.config.chunk_size;
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let chunks: Vec<_> = chunks_mut_exact(bytes, chunk_size).collect();
 
-        let handle = RequestHandle::new(chunks.len());
+        let handle = Handle::new(chunks.len());
 
         for (chunk, bytes) in chunks.into_iter().enumerate() {
             let msg = RegistrationMessage {
                 id,
                 chunk,
-                state: handle.core.clone(),
+                state: handle.state.clone(),
                 remote: remote.slice(chunk * chunk_size..chunk * chunk_size + bytes.len()),
                 bytes,
             };

@@ -1138,6 +1138,7 @@ impl QueuePairBuilder {
                 qp: QueuePair {
                     pd: self.pd.clone(),
                     qp,
+                    _cq: (self.send.clone(), self.recv.clone())
                 },
                 gid_index: self.gid_index,
                 traffic_class: self.traffic_class,
@@ -1814,6 +1815,7 @@ impl ProtectionDomain {
 pub struct QueuePair {
     pd: Arc<ProtectionDomainInner>,
     qp: *mut ffi::ibv_qp,
+    _cq: (Arc<CompletionQueueInner>, Arc<CompletionQueueInner>),
 }
 
 unsafe impl Send for QueuePair {}

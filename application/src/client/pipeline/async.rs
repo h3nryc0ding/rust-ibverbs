@@ -1,4 +1,4 @@
-use super::lib::{DeregistrationMessage, PostMessage, RegistrationMessage};
+use super::lib::{DeregistrationMessage, Handle, Pending, PostMessage, RegistrationMessage};
 use crate::chunks_mut_exact;
 use crate::client::{
     AsyncClient, BaseClient, RequestHandle,
@@ -52,10 +52,7 @@ impl AsyncClient for Client {
                         bytes,
                     } = msg;
                     let mr = pd.register(bytes).unwrap();
-                    state
-                        .progress
-                        .registered_acquired
-                        .fetch_add(1, Ordering::Relaxed);
+                    state.registered.fetch_add(1, Ordering::Relaxed);
                     let msg = PostMessage {
                         id,
                         chunk,
@@ -98,8 +95,8 @@ impl AsyncClient for Client {
                         }
                     }
                     if posted {
-                        state.progress.posted.fetch_add(1, Ordering::Relaxed);
-                        pending.insert(wr_id, (state, mr));
+                        state.posted.fetch_add(1, Ordering::Relaxed);
+                        pending.insert(wr_id, Pending { state, mr });
                     } else {
                         waiting.push_front(PostMessage {
                             id,
@@ -124,9 +121,9 @@ impl AsyncClient for Client {
                     assert!(completion.is_valid());
                     let wr_id = completion.wr_id();
 
-                    if let Some((state, mr)) = pending.remove(&wr_id) {
+                    if let Some(Pending { state, mr }) = pending.remove(&wr_id) {
                         let (id, chunk) = decode_wr_id(wr_id);
-                        state.progress.received.fetch_add(1, Ordering::Relaxed);
+                        state.received.fetch_add(1, Ordering::Relaxed);
                         let msg = DeregistrationMessage {
                             id,
                             chunk,
@@ -150,11 +147,8 @@ impl AsyncClient for Client {
                         chunk, state, mr, ..
                     } = msg;
                     let bytes = mr.deregister().unwrap();
-                    state.aggregator.bytes.insert(chunk, bytes);
-                    state
-                        .progress
-                        .deregistered_copied
-                        .fetch_add(1, Ordering::Relaxed);
+                    state.bytes.insert(chunk, bytes);
+                    state.deregistered.fetch_add(1, Ordering::Relaxed);
                 });
             }
         });
@@ -169,13 +163,13 @@ impl AsyncClient for Client {
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let chunks = chunks_mut_exact(bytes, chunk_size).collect::<Vec<_>>();
 
-        let handle = RequestHandle::new(chunks.len());
+        let handle = Handle::new(chunks.len());
 
         for (chunk, bytes) in chunks.into_iter().enumerate() {
             let msg = RegistrationMessage {
                 id,
                 chunk,
-                state: handle.core.clone(),
+                state: handle.state.clone(),
                 remote: remote.slice(chunk * chunk_size..chunk * chunk_size + bytes.len()),
                 bytes,
             };
@@ -183,6 +177,6 @@ impl AsyncClient for Client {
             self.reg_tx.send(msg).unwrap()
         }
 
-        handle.wait() // TODO: no fire and forget
+        task::spawn_blocking(move || handle.acquire()).await?
     }
 }
