@@ -1,5 +1,5 @@
 use application::bench::{DefaultCLI, bench_blocking};
-use application::client::ideal::{Client, Config};
+use application::client::ideal::blocking::{Client, Config};
 use clap::Parser;
 use std::io;
 
