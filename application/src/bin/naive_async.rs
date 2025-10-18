@@ -1,4 +1,3 @@
-use application::MI_B;
 use application::bench::{DefaultCLI, bench_async};
 use application::client::naive::r#async::{Client, Config};
 use clap::Parser;
@@ -9,12 +8,6 @@ use std::io;
 pub struct CLI {
     #[command(flatten)]
     default: DefaultCLI,
-
-    #[arg(long, default_value_t = 4 * MI_B)]
-    mr_size: usize,
-
-    #[arg(long, default_value_t = 32)]
-    mr_count: usize,
 }
 
 #[tokio::main]

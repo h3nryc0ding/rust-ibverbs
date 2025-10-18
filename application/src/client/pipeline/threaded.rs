@@ -161,7 +161,7 @@ impl NonBlockingClient for Client {
 
     fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<Self::Handle> {
         assert_eq!(bytes.len(), remote.len());
-        let chunk_size = self.config.chunk_size;
+        let chunk_size = self.config.chunk_size.min(bytes.len());
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
         let chunks: Vec<_> = chunks_mut_exact(bytes, chunk_size).collect();

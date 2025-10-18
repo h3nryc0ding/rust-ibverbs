@@ -1138,7 +1138,7 @@ impl QueuePairBuilder {
                 qp: QueuePair {
                     pd: self.pd.clone(),
                     qp,
-                    _cq: (self.send.clone(), self.recv.clone())
+                    _cq: (self.send.clone(), self.recv.clone()),
                 },
                 gid_index: self.gid_index,
                 traffic_class: self.traffic_class,

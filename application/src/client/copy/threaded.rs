@@ -154,8 +154,8 @@ impl NonBlockingClient for Client {
                         mut bytes,
                         ..
                     } = msg;
-                    let src_slice = mr.as_slice();
                     let dst_slice = bytes.as_mut();
+                    let src_slice = mr.as_slice()[..dst_slice.len()].as_ref();
                     dst_slice.copy_from_slice(src_slice);
 
                     state.bytes.insert(chunk, bytes);
@@ -177,10 +177,10 @@ impl NonBlockingClient for Client {
 
     fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<Self::Handle> {
         assert_eq!(bytes.len(), remote.len());
-        let mr_size = self.config.mr_size;
+        let chunk_size = self.config.mr_size.min(bytes.len());
 
         let id = self.id.fetch_add(1, Ordering::Relaxed);
-        let chunks: Vec<_> = chunks_mut_exact(bytes, mr_size).collect();
+        let chunks: Vec<_> = chunks_mut_exact(bytes, chunk_size).collect();
 
         let handle = Handle::new(chunks.len());
 
@@ -189,7 +189,7 @@ impl NonBlockingClient for Client {
                 id,
                 chunk,
                 state: handle.state.clone(),
-                remote: remote.slice(chunk * mr_size..chunk * mr_size + bytes.len()),
+                remote: remote.slice(chunk * chunk_size..chunk * chunk_size + bytes.len()),
                 bytes,
             };
             trace!(message = ?msg, operation = "send", channel = "post");

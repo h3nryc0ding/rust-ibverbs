@@ -26,7 +26,7 @@ impl BlockingClient for Client {
 
     fn fetch(&mut self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
         assert_eq!(bytes.len(), remote.len());
-        let chunk_size = self.config.chunk_size;
+        let chunk_size = self.config.chunk_size.min(bytes.len());
 
         let mut completions = vec![ibv_wc::default(); 16];
 

@@ -3,9 +3,9 @@ use crate::{GI_B, MI_B, chunks_mut_exact};
 use bytes::BytesMut;
 use clap::Parser;
 use ibverbs::RemoteMemorySlice;
-use std::io;
 use std::net::IpAddr;
 use std::time::Instant;
+use std::{io, time};
 
 #[derive(Debug, Parser)]
 pub struct DefaultCLI {
@@ -34,7 +34,7 @@ pub fn bench_blocking<C: BlockingClient>(args: &DefaultCLI, config: C::Config) -
     let remotes = client.remotes();
 
     let mut client = C::new(client, config)?;
-    let remote = remotes[0].slice(0..512 * MI_B);
+    let remote = remotes[0].slice(0..args.size);
 
     if !args.skip_latency {
         latency_blocking(&mut client, &remote, args)?;
@@ -60,7 +60,7 @@ pub fn bench_non_blocking<C: NonBlockingClient>(
     let remotes = client.remotes();
 
     let mut client = C::new(client, config)?;
-    let remote = remotes[0].slice(0..512 * MI_B);
+    let remote = remotes[0].slice(0..args.size);
 
     if !args.skip_latency {
         latency_threaded(&mut client, &remote, args)?;
@@ -83,7 +83,7 @@ pub async fn bench_async<C: AsyncClient>(args: &DefaultCLI, config: C::Config) -
     let remotes = client.remotes();
 
     let mut client = C::new(client, config).await?;
-    let remote = remotes[0].slice(0..512 * MI_B);
+    let remote = remotes[0].slice(0..args.size);
 
     if !args.skip_latency {
         latency_async(&mut client, &remote, args).await?;
@@ -128,19 +128,19 @@ fn throughput_blocking<C: BlockingClient>(
     remote: &RemoteMemorySlice,
     args: &DefaultCLI,
 ) -> io::Result<()> {
-    let bytes = BytesMut::zeroed(args.size * args.iterations);
-    let mut results = Vec::with_capacity(args.iterations);
+    let mut times = Vec::with_capacity(args.iterations);
+    for _ in 0..args.iterations {
+        let bytes = BytesMut::zeroed(args.size);
 
-    let start = Instant::now();
-    for bytes in chunks_mut_exact(bytes, args.size) {
+        let start = Instant::now();
         let res = client.fetch(bytes, remote)?;
+        let end = Instant::now();
 
-        results.push(res);
+        times.push(end - start);
+        drop(res);
     }
-    let end = Instant::now();
-    drop(results);
 
-    print_throughput(args.size as f64 * args.iterations as f64, end - start);
+    print_throughput(args.size as f64 * args.iterations as f64, &times);
     Ok(())
 }
 
@@ -200,7 +200,7 @@ fn throughput_threaded<C: NonBlockingClient>(
     let end = Instant::now();
     drop(handles);
 
-    print_throughput(args.iterations as f64 * args.size as f64, end - start);
+    print_throughput(args.iterations as f64 * args.size as f64, &[end - start]);
     Ok(())
 }
 
@@ -257,7 +257,7 @@ async fn throughput_async<C: AsyncClient>(
     let end = Instant::now();
     drop(results);
 
-    print_throughput(args.size as f64 * args.iterations as f64, end - start);
+    print_throughput(args.size as f64 * args.iterations as f64, &[end - start]);
     Ok(())
 }
 
@@ -274,21 +274,19 @@ async fn validate_async<C: AsyncClient>(
     Ok(())
 }
 
-fn print_latency(latencies: &[std::time::Duration]) {
+fn print_latency(latencies: &[time::Duration]) {
     if latencies.is_empty() {
         println!("Latency: No data recorded.");
         return;
     }
     let iterations = latencies.len();
-    let avg = latencies.iter().map(|d| d.as_secs_f64()).sum::<f64>() / iterations as f64;
-    let min = latencies
+    let secs = latencies
         .iter()
         .map(|d| d.as_secs_f64())
-        .fold(f64::INFINITY, f64::min);
-    let max = latencies
-        .iter()
-        .map(|d| d.as_secs_f64())
-        .fold(f64::NEG_INFINITY, f64::max);
+        .collect::<Vec<_>>();
+    let avg = secs.iter().sum::<f64>() / iterations as f64;
+    let min = secs.iter().fold(f64::INFINITY, |a, &b| a.min(b));
+    let max = secs.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
 
     println!(
         "Latency: avg = {:.3} µs, min = {:.3} µs, max = {:.3} µs",
@@ -298,8 +296,12 @@ fn print_latency(latencies: &[std::time::Duration]) {
     );
 }
 
-fn print_throughput(bytes: f64, duration: std::time::Duration) {
-    let secs = duration.as_secs_f64();
+fn print_throughput(bytes: f64, times: &[time::Duration]) {
+    if times.is_empty() {
+        println!("Throughput: No data recorded.");
+        return;
+    }
+    let secs = times.iter().map(|d| d.as_secs_f64()).sum::<f64>();
     let gbps = bytes / GI_B as f64 / secs;
 
     println!(
