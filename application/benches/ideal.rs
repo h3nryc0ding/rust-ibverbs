@@ -3,7 +3,6 @@ use application::client::{BaseClient, BlockingClient, ideal};
 use application::{GI_B, KI_B};
 use bytes::BytesMut;
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use ibverbs::RemoteMemorySlice;
 use std::time::Duration;
 use tokio::time::Instant;
 
@@ -13,43 +12,32 @@ fn blocking(c: &mut Criterion) {
             assert_eq!(req_size % chunk_size, 0);
             let mut group = c.benchmark_group(format!("ideal::blocking::{}", chunk_size));
 
-            let mut client = None::<(ideal::blocking::Client, RemoteMemorySlice)>;
             group.throughput(Throughput::Bytes(req_size as u64));
             group.bench_with_input(
                 BenchmarkId::from_parameter(req_size),
                 &req_size,
                 |b, &size| {
+                    let base = BaseClient::new(REMOTE_IP).unwrap();
+                    let remote = base.remotes()[0].slice(0..req_size);
+                    let config = ideal::blocking::Config {
+                        mr_size: chunk_size,
+                        mr_count: req_size / chunk_size,
+                    };
+                    let mut client = ideal::blocking::Client::new(base, config).unwrap();
+
+                    let mut garbage = Vec::new();
                     b.iter_custom(|iters| {
                         let iters = iters as usize;
-                        let config = ideal::blocking::Config {
-                            mr_size: chunk_size,
-                            mr_count: req_size / chunk_size,
-                        };
-
-                        let rebuild = client
-                            .as_ref()
-                            .map(|(client, _)| *client.config() != config)
-                            .unwrap_or(true);
-
-                        if rebuild {
-                            let base = BaseClient::new(REMOTE_IP).unwrap();
-                            let remote = base.remotes()[0].slice(0..req_size);
-                            let new_client = ideal::blocking::Client::new(base, config).unwrap();
-                            client = Some((new_client, remote));
-                        }
-                        let (client, remote) = client.as_mut().unwrap();
-
-                        let mut bytes = vec![BytesMut::zeroed(size); iters];
-                        let mut results = Vec::with_capacity(iters);
+                        let mut bytes = (0..iters)
+                            .map(|_| BytesMut::zeroed(size))
+                            .collect::<Vec<_>>();
 
                         let start = Instant::now();
-                        while let Some(bytes) = bytes.pop() {
-                            results.push(client.fetch(bytes, &remote).unwrap());
+                        for bytes in bytes.drain(..) {
+                            let res = client.fetch(bytes, &remote).unwrap();
+                            garbage.push(res);
                         }
-
-                        let elapsed = start.elapsed();
-                        drop(results);
-                        elapsed
+                        start.elapsed()
                     });
                 },
             );
