@@ -11,6 +11,9 @@ pub struct CLI {
 
     #[arg(long, default_value_t = 32)]
     mr_count: usize,
+
+    #[arg(long, default_value = None)]
+    mr_size: Option<usize>,
 }
 
 fn main() -> io::Result<()> {
@@ -23,8 +26,12 @@ fn main() -> io::Result<()> {
 impl From<&CLI> for Config {
     fn from(value: &CLI) -> Self {
         Self {
-            mr_size: value.default.size,
             mr_count: value.mr_count,
+            mr_size: if let Some(size) = value.mr_size {
+                size
+            } else {
+                value.default.size
+            },
         }
     }
 }

@@ -30,7 +30,7 @@ impl BlockingClient for Client {
 
         let mut completions = vec![ibv_wc::default(); 16];
 
-        let mut chunks = VecDeque::new();
+        let mut chunks = VecDeque::with_capacity(bytes.len() / chunk_size + 1);
         for (chunk, bytes) in chunks_mut_exact(bytes, chunk_size).enumerate() {
             let start = chunk * chunk_size;
             let length = bytes.len();

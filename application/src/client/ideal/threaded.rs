@@ -47,13 +47,13 @@ impl NonBlockingClient for Client {
             let mut pending = HashMap::new();
             let mut completions = [ibv_wc::default(); 16];
             let mut outstanding = VecDeque::new();
-            let mut mrs: VecDeque<MemoryRegion> = VecDeque::with_capacity(config.mr_count);
+            let mut mrs: Vec<MemoryRegion> = Vec::with_capacity(config.mr_count);
 
             loop {
                 match mr_rx.try_recv() {
                     Ok(msg) => {
                         trace!(message = ?msg, operation = "try_recv", channel = "mr");
-                        mrs.push_back(msg.0)
+                        mrs.push(msg.0)
                     }
                     Err(TryRecvError::Disconnected) => break,
                     _ => {}
@@ -68,7 +68,7 @@ impl NonBlockingClient for Client {
                 }
 
                 if !mrs.is_empty() && !outstanding.is_empty() {
-                    let mr = mrs.pop_front().unwrap();
+                    let mr = mrs.pop().unwrap();
                     let PostMessage { id, state, remote } = outstanding.pop_front().unwrap();
 
                     let local = mr.slice_local(..).collect::<Vec<_>>();
@@ -86,7 +86,7 @@ impl NonBlockingClient for Client {
                         }
                     }
                     if !posted {
-                        mrs.push_front(mr);
+                        mrs.push(mr);
                         outstanding.push_front(PostMessage { id, state, remote })
                     } else {
                         state.posted.store(true, Ordering::Relaxed);

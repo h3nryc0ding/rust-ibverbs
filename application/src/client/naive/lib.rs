@@ -23,11 +23,11 @@ pub(crate) struct State {
 
 impl RequestHandle for Handle {
     fn is_available(&self) -> bool {
-        self.state.received.load(Ordering::Acquire)
+        self.state.received.load(Ordering::Relaxed)
     }
 
     fn is_acquirable(&self) -> bool {
-        self.state.deregistered.load(Ordering::Acquire)
+        self.state.deregistered.load(Ordering::Relaxed)
     }
 
     fn acquire(self) -> io::Result<BytesMut> {

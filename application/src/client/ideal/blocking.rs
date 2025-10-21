@@ -1,8 +1,8 @@
-use crate::chunks_mut_exact;
 use crate::client::{BaseClient, BlockingClient};
+use crate::{chunks_mut_exact, chunks_unsplit};
 use bytes::BytesMut;
 use ibverbs::{MemoryRegion, RemoteMemorySlice, ibv_wc};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::{hint, io};
 
 pub struct Config {
@@ -12,7 +12,7 @@ pub struct Config {
 
 pub struct Client {
     base: BaseClient,
-    mrs: VecDeque<MemoryRegion>,
+    mrs: Vec<MemoryRegion>,
 
     config: Config,
 }
@@ -21,12 +21,12 @@ impl BlockingClient for Client {
     type Config = Config;
 
     fn new(client: BaseClient, config: Config) -> io::Result<Self> {
-        let mut mrs = VecDeque::with_capacity(config.mr_count);
+        let mut mrs = Vec::with_capacity(config.mr_count);
         for _ in 0..config.mr_count {
             loop {
                 match client.pd.allocate_zeroed(config.mr_size) {
                     Ok(mr) => {
-                        mrs.push_back(mr);
+                        mrs.push(mr);
                         break;
                     }
                     Err(e) if e.kind() == io::ErrorKind::OutOfMemory => continue,
@@ -55,7 +55,7 @@ impl BlockingClient for Client {
 
         while received < chunks.len() {
             while chunk < chunks.len() {
-                if let Some(mr) = self.mrs.pop_front() {
+                if let Some(mr) = self.mrs.pop() {
                     let start = chunk * mr_size;
                     let length = chunks[chunk].len();
                     let local = mr.slice_local(..length).collect::<Vec<_>>();
@@ -75,7 +75,7 @@ impl BlockingClient for Client {
                         }
                     }
                     if !posted {
-                        self.mrs.push_front(mr);
+                        self.mrs.push(mr);
                         break;
                     } else {
                         outstanding.insert(chunk, mr);
@@ -91,7 +91,7 @@ impl BlockingClient for Client {
                 let chunk = completion.wr_id() as usize;
 
                 if let Some(mr) = outstanding.remove(&chunk) {
-                    self.mrs.push_back(mr);
+                    self.mrs.push(mr);
                     received += 1;
                 } else {
                     panic!("unknown completion: {completion:?}");
@@ -99,12 +99,6 @@ impl BlockingClient for Client {
             }
         }
 
-        chunks
-            .into_iter()
-            .reduce(|mut res, nxt| {
-                res.unsplit(nxt);
-                res
-            })
-            .ok_or_else(|| io::Error::from(io::ErrorKind::UnexpectedEof))
+        chunks_unsplit(chunks.into_iter())
     }
 }

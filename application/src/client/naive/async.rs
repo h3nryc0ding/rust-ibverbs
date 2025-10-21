@@ -6,10 +6,11 @@ use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::task;
+use tokio::{task, time};
 use tracing::trace;
 
 pub struct Config;
@@ -155,6 +156,9 @@ impl AsyncClient for Client {
         trace!(message = ?msg, operation = "send", channel = "reg");
         self.reg_tx.send(msg).unwrap();
 
-        task::spawn_blocking(move || handle.acquire()).await?
+        while !handle.is_acquirable() {
+            time::sleep(Duration::from_nanos(1)).await;
+        }
+        handle.acquire()
     }
 }

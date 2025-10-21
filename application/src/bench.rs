@@ -3,9 +3,18 @@ use crate::{GI_B, MI_B, chunks_mut_exact};
 use bytes::BytesMut;
 use clap::Parser;
 use ibverbs::RemoteMemorySlice;
-use std::net::IpAddr;
+use std::net::{IpAddr, Ipv4Addr};
 use std::time::Instant;
-use std::{io, time};
+use std::{io, iter, time};
+
+// for benches as they can't have their own mod/lib
+pub static REMOTE_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(141, 76, 47, 9));
+pub fn doubled(start: usize, end: usize) -> impl Iterator<Item = usize> {
+    iter::successors(Some(start), move |&current| {
+        let next = current * 2;
+        if next > end { None } else { Some(next) }
+    })
+}
 
 #[derive(Debug, Parser)]
 pub struct DefaultCLI {
@@ -105,7 +114,6 @@ fn latency_blocking<C: BlockingClient>(
     args: &DefaultCLI,
 ) -> io::Result<()> {
     let mut latencies = Vec::with_capacity(args.iterations);
-    let mut results = Vec::with_capacity(args.iterations);
 
     for _ in 0..args.iterations {
         let bytes = BytesMut::zeroed(args.size);
@@ -114,10 +122,9 @@ fn latency_blocking<C: BlockingClient>(
         let res = client.fetch(bytes, remote)?;
         let end = Instant::now();
 
-        results.push(res);
         latencies.push(end - start);
+        drop(res);
     }
-    drop(results);
 
     print_latency(&latencies);
     Ok(())
@@ -326,7 +333,7 @@ fn validate(bytes: &[u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn init_tracing() {
+pub fn init_tracing() {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_thread_ids(true)
