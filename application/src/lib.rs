@@ -1,10 +1,5 @@
 use bincode::config::{Configuration, standard};
 use bytes::BytesMut;
-use hwlocality::Topology;
-use hwlocality::cpu::binding::CpuBindingFlags;
-use hwlocality::cpu::cpuset::CpuSet;
-use hwlocality::memory::binding::{MemoryBindingFlags, MemoryBindingPolicy};
-use hwlocality::object::depth::Depth;
 use std::{io, iter};
 
 pub mod bench;
@@ -22,30 +17,40 @@ pub static GB: usize = 1000 * MB;
 
 pub(crate) const BINCODE_CONFIG: Configuration = standard();
 
-fn pin_thread_to_node<const NODE: usize>() -> io::Result<()> {
-    let tid = hwlocality::current_thread_id();
-    let topology = Topology::new().unwrap();
+#[cfg(feature = "hwlocality")]
+pub mod hwlocality {
+    use std::io;
+    use hwlocality::Topology;
+    use hwlocality::cpu::binding::CpuBindingFlags;
+    use hwlocality::cpu::cpuset::CpuSet;
+    use hwlocality::memory::binding::{MemoryBindingFlags, MemoryBindingPolicy};
+    use hwlocality::object::depth::Depth;
 
-    let node = topology
-        .objects_at_depth(Depth::NUMANode)
-        .nth(NODE)
-        .unwrap();
-    let nodeset = node.nodeset().unwrap();
-    let cpuset = CpuSet::from_nodeset(&topology, nodeset);
+    pub fn pin_thread_to_node<const NODE: usize>() -> io::Result<()> {
+        let tid = hwlocality::current_thread_id();
+        let topology = Topology::new().unwrap();
 
-    topology
-        .bind_thread_cpu(tid, &cpuset, CpuBindingFlags::empty())
-        .unwrap();
+        let node = topology
+            .objects_at_depth(Depth::NUMANode)
+            .nth(NODE)
+            .unwrap();
+        let nodeset = node.nodeset().unwrap();
+        let cpuset = CpuSet::from_nodeset(&topology, nodeset);
 
-    topology
-        .bind_memory(
-            &cpuset,
-            MemoryBindingPolicy::Bind,
-            MemoryBindingFlags::THREAD,
-        )
-        .unwrap();
+        topology
+            .bind_thread_cpu(tid, &cpuset, CpuBindingFlags::empty())
+            .unwrap();
 
-    Ok(())
+        topology
+            .bind_memory(
+                &cpuset,
+                MemoryBindingPolicy::Bind,
+                MemoryBindingFlags::THREAD,
+            )
+            .unwrap();
+
+        Ok(())
+    }
 }
 
 pub fn chunks_mut_exact(mut buf: BytesMut, chunk_size: usize) -> impl Iterator<Item = BytesMut> {

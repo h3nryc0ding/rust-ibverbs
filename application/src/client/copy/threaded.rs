@@ -1,9 +1,9 @@
 use super::lib::{CopyMessage, Handle, MRMessage, Pending, PostMessage};
+use crate::chunks_mut_exact;
 use crate::client::{
-    BaseClient, NUMA_NODE, NonBlockingClient,
+    BaseClient, NonBlockingClient,
     lib::{decode_wr_id, encode_wr_id},
 };
-use crate::{chunks_mut_exact, pin_thread_to_node};
 use bytes::BytesMut;
 use crossbeam::channel;
 use crossbeam::channel::{Sender, TryRecvError};
@@ -12,6 +12,11 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{hint, io, thread};
 use tracing::trace;
+
+#[cfg(feature = "hwlocality")]
+use crate::hwlocality::pin_thread_to_node;
+#[cfg(feature = "hwlocality")]
+use crate::client::NUMA_NODE;
 
 #[derive(Eq, PartialEq)]
 pub struct Config {
@@ -32,6 +37,7 @@ impl NonBlockingClient for Client {
     type Handle = Handle;
 
     fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+        #[cfg(feature = "hwlocality")]
         pin_thread_to_node::<NUMA_NODE>()?;
 
         let id = AtomicUsize::new(0);
@@ -143,6 +149,7 @@ impl NonBlockingClient for Client {
             let copy_rx = copy_rx.clone();
             let mr_tx = mr_tx.clone();
             thread::spawn(move || {
+                #[cfg(feature = "hwlocality")]
                 pin_thread_to_node::<NUMA_NODE>().unwrap();
 
                 while let Ok(msg) = copy_rx.recv() {

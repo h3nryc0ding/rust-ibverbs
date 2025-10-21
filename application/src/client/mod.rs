@@ -8,6 +8,7 @@ use bytes::BytesMut;
 use ibverbs::{CompletionQueue, ProtectionDomain, QueuePair, RemoteMemorySlice};
 use std::{hint, io};
 
+#[cfg(feature = "hwlocality")]
 pub(crate) const NUMA_NODE: usize = 1;
 
 pub struct BaseClient {

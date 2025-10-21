@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 ibverbs = { path = "../ibverbs", features = ["serde"] }
-hwlocality = "1.0.0-alpha.11"
 clap = { version = "4.5.47", features = ["derive"] }
 bincode = { version = "2.0.1", features = ["serde"] }
 tracing = "0.1.41"
@@ -15,10 +14,13 @@ bytes = "1.10.1"
 dashmap = "6.1.0"
 crossbeam = { version = "0.8.4", features = ["crossbeam-channel"] }
 futures = "0.3.31"
+hwlocality = { version = "1.0.0-alpha.11", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.7.0", features = ["async_tokio"] }
-rayon = "1.11.0"
+
+[features]
+default = ["hwlocality"]
 
 [[bench]]
 name = "ideal"

@@ -1,9 +1,9 @@
 use super::lib::{CopyMessage, Handle, MRMessage, Pending, PostMessage};
+use crate::chunks_mut_exact;
 use crate::client::{
-    AsyncClient, BaseClient, NUMA_NODE, RequestHandle,
+    AsyncClient, BaseClient, RequestHandle,
     lib::{decode_wr_id, encode_wr_id},
 };
-use crate::{chunks_mut_exact, pin_thread_to_node};
 use bytes::BytesMut;
 use ibverbs::{MemoryRegion, RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
@@ -14,6 +14,11 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task;
 use tracing::trace;
+
+#[cfg(feature = "hwlocality")]
+use crate::client::NUMA_NODE;
+#[cfg(feature = "hwlocality")]
+use crate::hwlocality::pin_thread_to_node;
 
 #[derive(Eq, PartialEq)]
 pub struct Config {
@@ -32,6 +37,7 @@ impl AsyncClient for Client {
     type Config = Config;
 
     async fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+        #[cfg(feature = "hwlocality")]
         pin_thread_to_node::<NUMA_NODE>()?;
 
         let id = AtomicUsize::new(0);
@@ -144,6 +150,7 @@ impl AsyncClient for Client {
                 let mr_tx = mr_tx.clone();
                 trace!(message = ?msg, operation = "recv", channel = "copy");
                 task::spawn_blocking(move || {
+                    #[cfg(feature = "hwlocality")]
                     pin_thread_to_node::<NUMA_NODE>().unwrap();
 
                     let CopyMessage {

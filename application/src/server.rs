@@ -1,4 +1,6 @@
-use crate::{BINCODE_CONFIG, PORT, pin_thread_to_node};
+#[cfg(feature = "hwlocality")]
+use crate::hwlocality::pin_thread_to_node;
+use crate::{BINCODE_CONFIG, PORT};
 use bincode::serde::{decode_from_std_read, encode_into_std_write};
 use ibverbs::ibv_qp_type::IBV_QPT_RC;
 use ibverbs::{CompletionQueue, MemoryRegion, ProtectionDomain, QueuePair};
@@ -6,6 +8,7 @@ use std::io;
 use std::net::{Ipv6Addr, TcpListener, TcpStream};
 use tracing::trace;
 
+#[cfg(feature = "hwlocality")]
 pub const NUMA_NODE: usize = 0;
 
 pub struct Config {
@@ -21,6 +24,7 @@ pub struct Server {
 
 impl Server {
     pub fn new(config: Config) -> io::Result<Self> {
+        #[cfg(feature = "hwlocality")]
         pin_thread_to_node::<NUMA_NODE>()?;
 
         let ctx = ibverbs::devices()?
