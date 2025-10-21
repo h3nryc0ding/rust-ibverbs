@@ -5,12 +5,14 @@ use ibverbs::{RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 
+#[derive(Eq, PartialEq)]
 pub struct Config {
     pub chunk_size: usize,
 }
 
 pub struct Client {
     base: BaseClient,
+
     config: Config,
 }
 
@@ -100,5 +102,9 @@ impl BlockingClient for Client {
         }
 
         Ok(result)
+    }
+
+    fn config(&self) -> &Self::Config {
+        &self.config
     }
 }

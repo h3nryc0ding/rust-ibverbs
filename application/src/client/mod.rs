@@ -19,9 +19,10 @@ pub struct BaseClient {
 }
 
 pub trait BlockingClient: Sized {
-    type Config;
+    type Config: Eq;
     fn new(c: BaseClient, config: Self::Config) -> io::Result<Self>;
     fn fetch(&mut self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut>;
+    fn config(&self) -> &Self::Config;
 }
 
 pub trait RequestHandle {
@@ -41,18 +42,20 @@ pub trait RequestHandle {
 }
 
 pub trait NonBlockingClient: Sized {
-    type Config;
+    type Config: Eq;
     type Handle: RequestHandle;
     fn new(c: BaseClient, config: Self::Config) -> io::Result<Self>;
     fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<Self::Handle>;
+    fn config(&self) -> &Self::Config;
 }
 
 pub trait AsyncClient: Sized {
-    type Config;
+    type Config: Eq;
     fn new(c: BaseClient, config: Self::Config) -> impl Future<Output = io::Result<Self>>;
     fn prefetch(
         &self,
         bytes: BytesMut,
         remote: &RemoteMemorySlice,
     ) -> impl Future<Output = io::Result<BytesMut>>;
+    fn config(&self) -> &Self::Config;
 }

@@ -15,6 +15,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::task;
 use tracing::trace;
 
+#[derive(Eq, PartialEq)]
 pub struct Config {
     pub mr_size: usize,
     pub mr_count: usize,
@@ -195,5 +196,9 @@ impl AsyncClient for Client {
         }
 
         task::spawn_blocking(move || handle.acquire()).await?
+    }
+
+    fn config(&self) -> &Self::Config {
+        &self.config
     }
 }

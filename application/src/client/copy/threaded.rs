@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{hint, io, thread};
 use tracing::trace;
 
+#[derive(Eq, PartialEq)]
 pub struct Config {
     pub mr_size: usize,
     pub mr_count: usize,
@@ -197,5 +198,9 @@ impl NonBlockingClient for Client {
         }
 
         Ok(handle)
+    }
+
+    fn config(&self) -> &Self::Config {
+        &self.config
     }
 }

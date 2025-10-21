@@ -3,17 +3,23 @@ use bytes::BytesMut;
 use ibverbs::{RemoteMemorySlice, ibv_wc};
 use std::io;
 
+#[derive(Eq, PartialEq)]
 pub struct Config;
 
 pub struct Client {
     base: BaseClient,
+
+    config: Config,
 }
 
 impl BlockingClient for Client {
     type Config = Config;
 
-    fn new(client: BaseClient, _: Config) -> io::Result<Self> {
-        Ok(Self { base: client })
+    fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+        Ok(Self {
+            base: client,
+            config,
+        })
     }
 
     fn fetch(&mut self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
@@ -33,5 +39,9 @@ impl BlockingClient for Client {
         }
 
         mr.deregister()
+    }
+
+    fn config(&self) -> &Self::Config {
+        &self.config
     }
 }

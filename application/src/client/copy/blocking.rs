@@ -5,6 +5,7 @@ use ibverbs::{MemoryRegion, RemoteMemorySlice, ibv_wc};
 use std::collections::HashMap;
 use std::{hint, io};
 
+#[derive(Eq, PartialEq)]
 pub struct Config {
     pub mr_size: usize,
     pub mr_count: usize,
@@ -104,5 +105,9 @@ impl BlockingClient for Client {
         }
 
         chunks_unsplit(chunks.into_iter())
+    }
+
+    fn config(&self) -> &Self::Config {
+        &self.config
     }
 }

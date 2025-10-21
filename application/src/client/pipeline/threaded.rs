@@ -13,6 +13,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{io, thread};
 use tracing::trace;
 
+#[derive(Eq, PartialEq)]
 pub struct Config {
     pub chunk_size: usize,
     pub concurrency_reg: usize,
@@ -181,5 +182,9 @@ impl NonBlockingClient for Client {
         }
 
         Ok(handle)
+    }
+
+    fn config(&self) -> &Self::Config {
+        &self.config
     }
 }

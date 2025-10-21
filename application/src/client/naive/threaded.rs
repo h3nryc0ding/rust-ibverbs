@@ -9,6 +9,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{io, thread};
 use tracing::trace;
 
+#[derive(Eq, PartialEq)]
 pub struct Config {
     pub concurrency_reg: usize,
     pub concurrency_dereg: usize,
@@ -17,6 +18,8 @@ pub struct Config {
 pub struct Client {
     id: AtomicUsize,
     reg_tx: Sender<RegistrationMessage>,
+
+    config: Config,
 }
 
 impl NonBlockingClient for Client {
@@ -140,7 +143,7 @@ impl NonBlockingClient for Client {
             });
         }
 
-        Ok(Self { id, reg_tx })
+        Ok(Self { id, reg_tx, config })
     }
 
     fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<Self::Handle> {
@@ -159,5 +162,9 @@ impl NonBlockingClient for Client {
         self.reg_tx.send(msg).unwrap();
 
         Ok(handle)
+    }
+
+    fn config(&self) -> &Self::Config {
+        &self.config
     }
 }
