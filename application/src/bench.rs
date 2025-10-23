@@ -1,24 +1,18 @@
 use crate::client::{AsyncClient, BaseClient, BlockingClient, NonBlockingClient, RequestHandle};
-use crate::{GI_B, MI_B, chunks_mut_exact};
+use crate::{GI_B, KI_B, sequence_multiplied};
 use bytes::BytesMut;
-use clap::Parser;
-use ibverbs::RemoteMemorySlice;
-use std::net::{IpAddr, Ipv4Addr};
-use std::time::Instant;
-use std::{io, iter, time};
+use futures::task::noop_waker;
+use std::collections::VecDeque;
+use std::task::Context;
+use std::time::{Duration, Instant};
+use std::{io, net};
 
-// for benches as they can't have their own mod/lib
-pub static REMOTE_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(141, 76, 47, 9));
-pub fn doubled(start: usize, end: usize) -> impl Iterator<Item = usize> {
-    iter::successors(Some(start), move |&current| {
-        let next = current * 2;
-        if next > end { None } else { Some(next) }
-    })
-}
+const MAX_INFLIGHT_MEM: usize = 10 * GI_B;
+const MAX_INFLIGHT_OPS: usize = 4 * 1024;
 
-#[derive(Debug, Parser)]
-pub struct DefaultCLI {
-    pub addr: IpAddr,
+#[derive(Debug, clap::Parser)]
+pub struct BaseCLI {
+    pub addr: net::IpAddr,
 
     #[arg(long, default_value_t = false)]
     pub skip_validation: bool,
@@ -29,292 +23,391 @@ pub struct DefaultCLI {
     #[arg(long, default_value_t = false)]
     pub skip_throughput: bool,
 
-    #[arg(short, long, default_value_t = 1000)]
-    pub iterations: usize,
+    #[arg(long, default_value_t = 5)]
+    pub warmup: usize,
 
-    #[arg(short, long, default_value_t = 512 * MI_B)]
-    pub size: usize,
+    #[arg(long, default_value_t = 180)]
+    pub measure: usize,
+
+    #[arg(long, default_value_t = 4 * KI_B)]
+    pub size_min: usize,
+
+    #[arg(long, default_value_t = 1 * GI_B)]
+    pub size_max: usize,
+
+    #[arg(long, default_value_t = 2)]
+    pub size_multiplier: usize,
+
+    #[arg(long, default_value_t = false)]
+    pub logging: bool,
+
+    #[arg(long, default_value_t = false)]
+    bench: bool,
 }
 
-pub fn bench_blocking<C: BlockingClient>(args: &DefaultCLI, config: C::Config) -> io::Result<()> {
-    init_tracing();
-
-    let client = BaseClient::new(args.addr)?;
-    let remotes = client.remotes();
-
-    let mut client = C::new(client, config)?;
-    let remote = remotes[0].slice(0..args.size);
-
-    if !args.skip_latency {
-        latency_blocking(&mut client, &remote, args)?;
-    }
-    if !args.skip_throughput {
-        throughput_blocking(&mut client, &remote, args)?;
+impl BaseCLI {
+    pub fn parse() -> Self {
+        let args: BaseCLI = clap::Parser::parse();
+        if args.logging {
+            tracing_subscriber::fmt()
+                .with_max_level(tracing::Level::TRACE)
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .with_target(true)
+                .compact()
+                .init();
+        }
+        args
     }
 
-    if !args.skip_validation {
-        validate_blocking(&mut client, &remote)?;
+    pub fn sizes(&self) -> impl Iterator<Item = usize> {
+        sequence_multiplied(self.size_min, self.size_max, self.size_multiplier)
     }
 
-    Ok(())
+    pub fn warmup(&self) -> Duration {
+        Duration::from_secs(self.warmup as u64)
+    }
+
+    pub fn measure(&self) -> Duration {
+        Duration::from_secs(self.measure as u64)
+    }
 }
 
-pub fn bench_non_blocking<C: NonBlockingClient>(
-    args: &DefaultCLI,
-    config: C::Config,
-) -> io::Result<()> {
-    init_tracing();
+#[derive(Debug)]
+pub struct LatencyStats {
+    pub p50: Duration,
+    pub p90: Duration,
+    pub p95: Duration,
+    pub p99: Duration,
+    pub p99_9: Duration,
+    pub p99_99: Duration,
+    pub min: Duration,
+    pub max: Duration,
+    pub mean: Duration,
 
-    let client = BaseClient::new(args.addr)?;
-    let remotes = client.remotes();
-
-    let mut client = C::new(client, config)?;
-    let remote = remotes[0].slice(0..args.size);
-
-    if !args.skip_latency {
-        latency_threaded(&mut client, &remote, args)?;
-    }
-    if !args.skip_throughput {
-        throughput_threaded(&mut client, &remote, args)?;
-    }
-
-    if !args.skip_validation {
-        validate_threaded(&mut client, &remote)?;
-    }
-
-    Ok(())
+    pub count: usize,
+    pub duration: Duration,
 }
 
-pub async fn bench_async<C: AsyncClient>(args: &DefaultCLI, config: C::Config) -> io::Result<()> {
-    init_tracing();
+impl LatencyStats {
+    fn from_latencies(latencies: &mut [Duration]) -> LatencyStats {
+        latencies.sort();
 
-    let client = BaseClient::new(args.addr)?;
-    let remotes = client.remotes();
+        let count = latencies.len() as f64;
+        let p50 = latencies[(count * 0.50).floor() as usize];
+        let p90 = latencies[(count * 0.90).floor() as usize];
+        let p95 = latencies[(count * 0.95).floor() as usize];
+        let p99 = latencies[(count * 0.99).floor() as usize];
+        let p99_9 = latencies[(count * 0.999).floor() as usize];
+        let p99_99 = latencies[(count * 0.9999).floor() as usize];
 
-    let mut client = C::new(client, config).await?;
-    let remote = remotes[0].slice(0..args.size);
+        let min = latencies[0];
+        let max = latencies[count as usize - 1];
 
-    if !args.skip_latency {
-        latency_async(&mut client, &remote, args).await?;
+        let sum = latencies.iter().sum::<Duration>();
+        let mean = sum / count as u32;
+
+        let duration = latencies.iter().sum::<Duration>();
+        Self {
+            p50,
+            p90,
+            p95,
+            p99,
+            p99_9,
+            p99_99,
+            min,
+            max,
+            mean,
+            count: count as usize,
+            duration,
+        }
     }
-    if !args.skip_throughput {
-        throughput_async(&mut client, &remote, args).await?;
-    }
-
-    if !args.skip_validation {
-        validate_async(&mut client, &remote).await?;
-    }
-
-    Ok(())
 }
 
-fn latency_blocking<C: BlockingClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-    args: &DefaultCLI,
-) -> io::Result<()> {
-    let mut latencies = Vec::with_capacity(args.iterations);
+#[derive(Debug)]
+pub struct ThroughputStats {
+    pub gib_s: f64,
+    pub op_s: f64,
 
-    for _ in 0..args.iterations {
-        let bytes = BytesMut::zeroed(args.size);
+    pub bytes: usize,
+    pub count: usize,
+    pub duration: Duration,
+}
 
+impl ThroughputStats {
+    fn from_latencies(size: usize, latencies: &[Duration]) -> ThroughputStats {
+        let count = latencies.len();
+        let duration = latencies.iter().sum::<Duration>();
+
+        Self::from_count(size, count, duration)
+    }
+
+    fn from_count(size: usize, count: usize, duration: Duration) -> ThroughputStats {
+        let bytes = count * size;
+
+        let gib = bytes as f64 / GI_B as f64;
+        let gib_s = gib / duration.as_secs_f64();
+        let op_s = count as f64 / duration.as_secs_f64();
+
+        Self {
+            gib_s,
+            op_s,
+            bytes,
+            count,
+            duration,
+        }
+    }
+}
+
+pub fn blocking<C: BlockingClient, F>(cli: &BaseCLI, mut f: F) -> io::Result<()>
+where
+    F: FnMut(BaseClient, usize) -> io::Result<C>,
+{
+    for size in cli.sizes() {
+        let base = BaseClient::new(cli.addr)?;
+        let remote = base.remotes[0].slice(0..size);
+        let mut client = f(base, size)?;
+        println!("size: {size}, config: {:?}", client.config());
+
+        if !cli.skip_validation {
+            let bytes = BytesMut::zeroed(size);
+            let result = client.fetch(bytes, &remote)?;
+            validate(&result)?;
+        }
+
+        if cli.skip_latency && cli.skip_throughput {
+            return Ok(());
+        }
+
+        let mut bytes = BytesMut::zeroed(size);
         let start = Instant::now();
-        let res = client.fetch(bytes, remote)?;
-        let end = Instant::now();
+        while start.elapsed() < cli.warmup() {
+            bytes = client.fetch(bytes, &remote)?;
+        }
 
-        latencies.push(end - start);
-        drop(res);
-    }
-
-    print_latency(&latencies);
-    Ok(())
-}
-
-fn throughput_blocking<C: BlockingClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-    args: &DefaultCLI,
-) -> io::Result<()> {
-    let mut times = Vec::with_capacity(args.iterations);
-    for _ in 0..args.iterations {
-        let bytes = BytesMut::zeroed(args.size);
-
+        let mut latencies = Vec::new();
         let start = Instant::now();
-        let res = client.fetch(bytes, remote)?;
-        let end = Instant::now();
+        while start.elapsed() < cli.measure() {
+            let start = Instant::now();
+            bytes = client.fetch(bytes, &remote)?;
+            let end = Instant::now();
 
-        times.push(end - start);
-        drop(res);
+            latencies.push(end - start);
+        }
+
+        if !cli.skip_latency {
+            let stats = LatencyStats::from_latencies(&mut latencies);
+            println!("{stats:?}")
+        }
+
+        if !cli.skip_throughput {
+            let stats = ThroughputStats::from_latencies(size, &mut latencies);
+            println!("{stats:?}")
+        }
     }
 
-    print_throughput(args.size as f64 * args.iterations as f64, &times);
     Ok(())
 }
 
-fn validate_blocking<C: BlockingClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-) -> io::Result<()> {
-    let size = remote.len();
+pub fn non_blocking<C: NonBlockingClient, F>(cli: &BaseCLI, mut f: F) -> io::Result<()>
+where
+    F: FnMut(BaseClient, usize) -> io::Result<C>,
+{
+    for size in cli.sizes() {
+        let base = BaseClient::new(cli.addr)?;
+        let remote = base.remotes[0].slice(0..size);
+        let client = f(base, size)?;
+        println!("size: {size}, config: {:?}", client.config());
 
-    let bytes = BytesMut::zeroed(size);
-    let result = client.fetch(bytes, remote)?;
+        if !cli.skip_validation {
+            let bytes = BytesMut::zeroed(size);
+            let handle = client.prefetch(bytes, &remote)?;
+            let result = handle.acquire()?;
+            validate(&result)?;
+        }
 
-    validate(&result)?;
+        if !cli.skip_latency {
+            let mut bytes = BytesMut::zeroed(size);
+            let start = Instant::now();
+            while start.elapsed() < cli.warmup() {
+                let handle = client.prefetch(bytes, &remote)?;
+                bytes = handle.acquire()?;
+            }
+
+            let mut latencies = Vec::new();
+            let start = Instant::now();
+            while start.elapsed() < cli.measure() {
+                let start = Instant::now();
+                let handle = client.prefetch(bytes, &remote)?;
+                handle.wait_available();
+                let end = Instant::now();
+
+                bytes = handle.acquire()?;
+                latencies.push(end - start);
+            }
+
+            let stats = LatencyStats::from_latencies(&mut latencies);
+            println!("{stats:?}")
+        }
+
+        if !cli.skip_throughput {
+            let inflight = MAX_INFLIGHT_OPS.min(MAX_INFLIGHT_MEM / size).max(1);
+
+            let mut bytes = (0..inflight)
+                .map(|_| BytesMut::zeroed(size))
+                .collect::<VecDeque<_>>();
+            let mut handles = VecDeque::with_capacity(inflight);
+
+            let start = Instant::now();
+            while start.elapsed() < cli.warmup() {
+                if let Some(bytes) = bytes.pop_front() {
+                    let handle = client.prefetch(bytes, &remote)?;
+                    handles.push_back(handle);
+                }
+                if let Some(handle) = handles.front() {
+                    if handle.is_acquirable() {
+                        let handle = handles.pop_front().unwrap();
+                        bytes.push_back(handle.acquire()?);
+                    }
+                }
+            }
+            for handle in handles.drain(..) {
+                bytes.push_back(handle.acquire()?);
+            }
+
+            assert_eq!(bytes.len(), inflight);
+            assert_eq!(handles.len(), 0);
+
+            let start = Instant::now();
+            let mut completed = 0;
+            while start.elapsed() < cli.measure() {
+                if let Some(bytes) = bytes.pop_front() {
+                    let handle = client.prefetch(bytes, &remote)?;
+                    handles.push_back(handle);
+                }
+                if let Some(handle) = handles.front() {
+                    if handle.is_acquirable() {
+                        completed += 1;
+                        let handle = handles.pop_front().unwrap();
+                        bytes.push_back(handle.acquire()?);
+                    }
+                }
+            }
+            // Handles are *expected* to finish FIFO,
+            // however internal concurrency *may* reorder requests slightly.
+            // By checking from right to left we are trying to avoid more
+            // requests finishing at the beginning of the queue
+            handles.iter().rev().for_each(|handle| {
+                if handle.is_acquirable() {
+                    completed += 1;
+                }
+            });
+            let stop = Instant::now();
+
+            let stats = ThroughputStats::from_count(size, completed, stop - start);
+            println!("{stats:?}")
+        }
+    }
+
     Ok(())
 }
 
-fn latency_threaded<C: NonBlockingClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-    args: &DefaultCLI,
-) -> io::Result<()> {
-    let mut latencies = Vec::with_capacity(args.iterations);
-    let mut handles = Vec::with_capacity(args.iterations);
+pub async fn r#async<C: AsyncClient, F, Fut>(cli: &BaseCLI, mut f: F) -> io::Result<()>
+where
+    F: FnMut(BaseClient, usize) -> Fut,
+    Fut: Future<Output = io::Result<C>>,
+{
+    for size in cli.sizes() {
+        let base = BaseClient::new(cli.addr)?;
+        let remote = base.remotes[0].slice(0..size);
+        let client = f(base, size).await?;
+        println!("size: {size}, config: {:?}", client.config());
 
-    for _ in 0..args.iterations {
-        let bytes = BytesMut::zeroed(args.size);
+        if !cli.skip_validation {
+            let bytes = BytesMut::zeroed(size);
+            let result = client.prefetch(bytes, &remote).await?;
+            validate(&result)?;
+        }
 
-        let start = Instant::now();
-        let handle = client.prefetch(bytes, remote)?;
-        handle.wait_available();
-        let end = Instant::now();
+        if !cli.skip_latency {
+            let mut bytes = BytesMut::zeroed(size);
+            let start = Instant::now();
+            while start.elapsed() < cli.warmup() {
+                bytes = client.prefetch(bytes, &remote).await?;
+            }
 
-        handles.push(handle);
-        latencies.push(end - start);
+            let mut latencies = Vec::new();
+            let start = Instant::now();
+            while start.elapsed() < cli.measure() {
+                let start = Instant::now();
+                bytes = client.prefetch(bytes, &remote).await?;
+                let end = Instant::now();
+
+                latencies.push(end - start);
+            }
+
+            let stats = LatencyStats::from_latencies(&mut latencies);
+            println!("{stats:?}")
+        }
+
+        if !cli.skip_throughput {
+            let inflight = MAX_INFLIGHT_OPS.min(MAX_INFLIGHT_MEM / size).max(1);
+
+            let waker = noop_waker();
+            let mut cx = Context::from_waker(&waker);
+
+            let mut bytes = (0..inflight)
+                .map(|_| BytesMut::zeroed(size))
+                .collect::<VecDeque<_>>();
+            let mut futures = VecDeque::with_capacity(inflight);
+
+            let start = Instant::now();
+            while start.elapsed() < cli.warmup() {
+                if futures.len() < inflight {
+                    if let Some(bytes) = bytes.pop_front() {
+                        futures.push_back(Box::pin(client.prefetch(bytes, &remote)));
+                    }
+                }
+                if let Some(future) = futures.front_mut() {
+                    if future.as_mut().poll(&mut cx).is_ready() {
+                        let future = futures.pop_front().unwrap();
+                        bytes.push_back(future.await?);
+                    }
+                }
+            }
+
+            let mut completed = 0;
+            let start = Instant::now();
+            while start.elapsed() < cli.measure() {
+                if futures.len() < inflight {
+                    if let Some(bytes) = bytes.pop_front() {
+                        futures.push_back(Box::pin(client.prefetch(bytes, &remote)));
+                    }
+                }
+                if let Some(future) = futures.front_mut() {
+                    if future.as_mut().poll(&mut cx).is_ready() {
+                        let future = futures.pop_front().unwrap();
+                        bytes.push_back(future.await?);
+                        completed += 1;
+                    }
+                }
+            }
+            // Handles are *expected* to finish FIFO,
+            // however internal concurrency *may* reorder requests slightly.
+            // By checking from right to left we are trying to avoid more
+            // requests finishing at the beginning of the queue
+            futures.iter_mut().rev().for_each(|future| {
+                if future.as_mut().poll(&mut cx).is_ready() {
+                    completed += 1;
+                }
+            });
+            let stop = Instant::now();
+
+            let stats = ThroughputStats::from_count(size, completed, stop - start);
+            println!("{stats:?}")
+        }
     }
-    drop(handles);
 
-    print_latency(&latencies);
     Ok(())
-}
-
-fn throughput_threaded<C: NonBlockingClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-    args: &DefaultCLI,
-) -> io::Result<()> {
-    let bytes = BytesMut::zeroed(args.size * args.iterations);
-    let mut handles = Vec::with_capacity(args.iterations);
-
-    let start = Instant::now();
-    for bytes in chunks_mut_exact(bytes, args.size) {
-        handles.push(client.prefetch(bytes, remote)?);
-    }
-    for handle in &handles {
-        handle.wait_available();
-    }
-    let end = Instant::now();
-    drop(handles);
-
-    print_throughput(args.iterations as f64 * args.size as f64, &[end - start]);
-    Ok(())
-}
-
-fn validate_threaded<C: NonBlockingClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-) -> io::Result<()> {
-    let size = remote.len();
-
-    let bytes = BytesMut::zeroed(size);
-    let result = client.prefetch(bytes, remote)?.acquire()?;
-
-    validate(&result)?;
-    Ok(())
-}
-
-async fn latency_async<C: AsyncClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-    args: &DefaultCLI,
-) -> io::Result<()> {
-    let mut latencies = Vec::with_capacity(args.iterations);
-    let mut results = Vec::with_capacity(args.iterations);
-
-    for _ in 0..args.iterations {
-        let bytes = BytesMut::zeroed(args.size);
-
-        let start = Instant::now();
-        let res = client.prefetch(bytes, remote).await?;
-        let end = Instant::now();
-
-        results.push(res);
-        latencies.push(end - start);
-    }
-    drop(results);
-
-    print_latency(&latencies);
-    Ok(())
-}
-
-async fn throughput_async<C: AsyncClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-    args: &DefaultCLI,
-) -> io::Result<()> {
-    let bytes = BytesMut::zeroed(args.size * args.iterations);
-    let mut futures = Vec::with_capacity(args.iterations);
-
-    let start = Instant::now();
-    for bytes in chunks_mut_exact(bytes, args.size) {
-        futures.push(client.prefetch(bytes, remote));
-    }
-    let results = futures::future::join_all(futures).await;
-    let end = Instant::now();
-    drop(results);
-
-    print_throughput(args.size as f64 * args.iterations as f64, &[end - start]);
-    Ok(())
-}
-
-async fn validate_async<C: AsyncClient>(
-    client: &mut C,
-    remote: &RemoteMemorySlice,
-) -> io::Result<()> {
-    let size = remote.len();
-
-    let bytes = BytesMut::zeroed(size);
-    let result = client.prefetch(bytes, remote).await?;
-
-    validate(&result)?;
-    Ok(())
-}
-
-fn print_latency(latencies: &[time::Duration]) {
-    if latencies.is_empty() {
-        println!("Latency: No data recorded.");
-        return;
-    }
-    let iterations = latencies.len();
-    let secs = latencies
-        .iter()
-        .map(|d| d.as_secs_f64())
-        .collect::<Vec<_>>();
-    let avg = secs.iter().sum::<f64>() / iterations as f64;
-    let min = secs.iter().fold(f64::INFINITY, |a, &b| a.min(b));
-    let max = secs.iter().fold(f64::NEG_INFINITY, |a, &b| a.max(b));
-
-    println!(
-        "Latency: avg = {:.3} µs, min = {:.3} µs, max = {:.3} µs",
-        avg * 1e6,
-        min * 1e6,
-        max * 1e6
-    );
-}
-
-fn print_throughput(bytes: f64, times: &[time::Duration]) {
-    if times.is_empty() {
-        println!("Throughput: No data recorded.");
-        return;
-    }
-    let secs = times.iter().map(|d| d.as_secs_f64()).sum::<f64>();
-    let gbps = bytes / GI_B as f64 / secs;
-
-    println!(
-        "Throughput: {:.2} GiB/s (transferred {} bytes in {:.3}s",
-        gbps, bytes, secs
-    );
 }
 
 fn validate(bytes: &[u8]) -> io::Result<()> {
@@ -329,14 +422,5 @@ fn validate(bytes: &[u8]) -> io::Result<()> {
             ));
         }
     }
-    println!("Validation passed with {} bytes", bytes.len());
     Ok(())
-}
-
-pub fn init_tracing() {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_thread_ids(true)
-        .compact()
-        .init();
 }

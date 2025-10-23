@@ -6,7 +6,6 @@ use ibverbs::ibv_qp_type::IBV_QPT_RC;
 use ibverbs::{CompletionQueue, MemoryRegion, ProtectionDomain, QueuePair};
 use std::io;
 use std::net::{Ipv6Addr, TcpListener, TcpStream};
-use tracing::trace;
 
 #[cfg(feature = "hwlocality")]
 pub const NUMA_NODE: usize = 0;
@@ -66,10 +65,8 @@ impl Server {
             .build()?;
         let local = pqp.endpoint()?;
 
-        trace!("Server local endpoint: {:?}", local);
         encode_into_std_write(local, &mut stream, BINCODE_CONFIG).unwrap();
         let remote = decode_from_std_read(&mut stream, BINCODE_CONFIG).unwrap();
-        trace!("Client remote endpoint: {:?}", remote);
         let qp = pqp.handshake(remote)?;
 
         encode_into_std_write(

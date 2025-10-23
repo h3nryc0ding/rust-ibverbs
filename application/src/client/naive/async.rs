@@ -1,5 +1,5 @@
 use super::lib::{DeregistrationMessage, Handle, Pending, PostMessage, RegistrationMessage};
-use crate::client::{AsyncClient, BaseClient, RequestHandle};
+use crate::client;
 use bytes::BytesMut;
 use ibverbs::{RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
@@ -13,7 +13,7 @@ use tokio::sync::mpsc::error::TryRecvError;
 use tokio::{task, time};
 use tracing::trace;
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Clone, Debug)]
 pub struct Config;
 
 pub struct Client {
@@ -23,10 +23,15 @@ pub struct Client {
     config: Config,
 }
 
-impl AsyncClient for Client {
+impl client::Client for Client {
     type Config = Config;
+    fn config(&self) -> &Self::Config {
+        &self.config
+    }
+}
 
-    async fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+impl client::AsyncClient for Client {
+    async fn new(client: client::BaseClient, config: Config) -> io::Result<Self> {
         let id = AtomicUsize::new(0);
 
         let (reg_tx, mut reg_rx) = mpsc::unbounded_channel();
@@ -107,7 +112,7 @@ impl AsyncClient for Client {
                         trace!(message = ?msg,operation = "try_recv",channel = "post");
                         waiting.push_back(msg)
                     }
-                    Err(TryRecvError::Disconnected) => return,
+                    Err(TryRecvError::Disconnected) if pending.is_empty() => return,
                     _ => {}
                 }
 
@@ -159,13 +164,9 @@ impl AsyncClient for Client {
         trace!(message = ?msg, operation = "send", channel = "reg");
         self.reg_tx.send(msg).unwrap();
 
-        while !handle.is_acquirable() {
+        while !client::RequestHandle::is_acquirable(&handle) {
             time::sleep(Duration::from_nanos(1)).await;
         }
-        handle.acquire()
-    }
-
-    fn config(&self) -> &Self::Config {
-        &self.config
+        client::RequestHandle::acquire(handle)
     }
 }

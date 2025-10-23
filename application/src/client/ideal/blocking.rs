@@ -1,27 +1,31 @@
-use crate::client::{BaseClient, BlockingClient};
-use crate::{chunks_mut_exact, chunks_unsplit};
+use crate::{chunks_mut_exact, chunks_unsplit, client};
 use bytes::BytesMut;
 use ibverbs::{MemoryRegion, RemoteMemorySlice, ibv_wc};
 use std::collections::HashMap;
 use std::{hint, io};
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Clone, Debug)]
 pub struct Config {
     pub mr_size: usize,
     pub mr_count: usize,
 }
 
 pub struct Client {
-    base: BaseClient,
+    base: client::BaseClient,
     mrs: Vec<MemoryRegion>,
 
     config: Config,
 }
 
-impl BlockingClient for Client {
+impl client::Client for Client {
     type Config = Config;
+    fn config(&self) -> &Self::Config {
+        &self.config
+    }
+}
 
-    fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+impl client::BlockingClient for Client {
+    fn new(client: client::BaseClient, config: Config) -> io::Result<Self> {
         let mut mrs = Vec::with_capacity(config.mr_count);
         for _ in 0..config.mr_count {
             loop {
@@ -101,9 +105,5 @@ impl BlockingClient for Client {
         }
 
         chunks_unsplit(chunks.into_iter())
-    }
-
-    fn config(&self) -> &Self::Config {
-        &self.config
     }
 }

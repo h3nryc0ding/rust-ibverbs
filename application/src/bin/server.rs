@@ -2,7 +2,6 @@ use application::GI_B;
 use application::server::{Config, Server};
 use clap::Parser;
 use std::io;
-use application::bench::init_tracing;
 
 #[derive(Debug, Parser)]
 #[command(author, version, about)]
@@ -12,7 +11,6 @@ pub struct CLI {
 }
 
 fn main() -> io::Result<()> {
-    init_tracing();
     let args = CLI::parse();
 
     let config = Config::from(args);

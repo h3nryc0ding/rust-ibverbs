@@ -10,30 +10,56 @@ bincode = { version = "2.0.1", features = ["serde"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 tokio = { version = "1.47.1", features = ["full"] }
+futures = "0.3.31"
 bytes = "1.10.1"
 dashmap = "6.1.0"
 crossbeam = { version = "0.8.4", features = ["crossbeam-channel"] }
-futures = "0.3.31"
 hwlocality = { version = "1.0.0-alpha.11", optional = true }
-
-[dev-dependencies]
-criterion = { version = "0.7.0", features = ["async_tokio"] }
 
 [features]
 default = ["hwlocality"]
 
+
 [[bench]]
-name = "ideal"
+name = "ideal_blocking"
 harness = false
 
 [[bench]]
-name = "naive"
+name = "ideal_non_blocking"
 harness = false
 
 [[bench]]
-name = "copy"
+name = "naive_blocking"
 harness = false
 
 [[bench]]
-name = "pipeline"
+name = "naive_non_blocking"
+harness = false
+
+[[bench]]
+name = "naive_async"
+harness = false
+
+[[bench]]
+name = "copy_blocking"
+harness = false
+
+[[bench]]
+name = "copy_non_blocking"
+harness = false
+
+[[bench]]
+name = "copy_async"
+harness = false
+
+[[bench]]
+name = "pipeline_blocking"
+harness = false
+
+[[bench]]
+name = "pipeline_non_blocking"
+harness = false
+
+[[bench]]
+name = "pipeline_async"
 harness = false

@@ -1,26 +1,22 @@
 use super::lib::{CopyMessage, Handle, MRMessage, Pending, PostMessage};
-use crate::chunks_mut_exact;
-use crate::client::{
-    AsyncClient, BaseClient, RequestHandle,
-    lib::{decode_wr_id, encode_wr_id},
-};
+use crate::client::lib::{decode_wr_id, encode_wr_id};
+use crate::{chunks_mut_exact, client};
 use bytes::BytesMut;
 use ibverbs::{MemoryRegion, RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use std::{hint, io};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::task;
+use tokio::{task, time};
 use tracing::trace;
 
 #[cfg(feature = "hwlocality")]
-use crate::client::NUMA_NODE;
-#[cfg(feature = "hwlocality")]
-use crate::hwlocality::pin_thread_to_node;
+use crate::{client::NUMA_NODE, hwlocality::pin_thread_to_node};
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Clone, Debug)]
 pub struct Config {
     pub mr_size: usize,
     pub mr_count: usize,
@@ -33,10 +29,15 @@ pub struct Client {
     config: Config,
 }
 
-impl AsyncClient for Client {
+impl client::Client for Client {
     type Config = Config;
+    fn config(&self) -> &Self::Config {
+        &self.config
+    }
+}
 
-    async fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+impl client::AsyncClient for Client {
+    async fn new(client: client::BaseClient, config: Config) -> io::Result<Self> {
         #[cfg(feature = "hwlocality")]
         pin_thread_to_node::<NUMA_NODE>()?;
 
@@ -70,7 +71,7 @@ impl AsyncClient for Client {
                         trace!(message = ?msg,operation = "try_recv",channel = "mr");
                         mrs.push(msg.0)
                     }
-                    Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Disconnected) if pending.is_empty() => return,
                     _ => {}
                 }
                 match post_rx.try_recv() {
@@ -78,7 +79,7 @@ impl AsyncClient for Client {
                         trace!(message = ?msg,operation = "try_recv",channel = "post");
                         outstanding.push_back(msg)
                     }
-                    Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Disconnected) if pending.is_empty() => return,
                     _ => {}
                 }
 
@@ -202,10 +203,9 @@ impl AsyncClient for Client {
             self.post_tx.send(msg).unwrap()
         }
 
-        task::spawn_blocking(move || handle.acquire()).await?
-    }
-
-    fn config(&self) -> &Self::Config {
-        &self.config
+        while !client::RequestHandle::is_acquirable(&handle) {
+            time::sleep(Duration::from_nanos(1)).await;
+        }
+        client::RequestHandle::acquire(handle)
     }
 }

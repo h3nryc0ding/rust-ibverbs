@@ -1,22 +1,20 @@
 use super::lib::{DeregistrationMessage, Handle, Pending, PostMessage, RegistrationMessage};
-use crate::chunks_mut_exact;
-use crate::client::{
-    AsyncClient, BaseClient, RequestHandle,
-    lib::{decode_wr_id, encode_wr_id},
-};
+use crate::client::lib::{decode_wr_id, encode_wr_id};
+use crate::{chunks_mut_exact, client};
 use bytes::BytesMut;
 use ibverbs::{RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::task;
+use tokio::{task, time};
 use tracing::trace;
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Clone, Debug)]
 pub struct Config {
     pub chunk_size: usize,
 }
@@ -28,10 +26,15 @@ pub struct Client {
     config: Config,
 }
 
-impl AsyncClient for Client {
+impl client::Client for Client {
     type Config = Config;
+    fn config(&self) -> &Self::Config {
+        &self.config
+    }
+}
 
-    async fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+impl client::AsyncClient for Client {
+    async fn new(client: client::BaseClient, config: Config) -> io::Result<Self> {
         let id = AtomicUsize::new(0);
 
         let (reg_tx, mut reg_rx) = mpsc::unbounded_channel();
@@ -114,7 +117,7 @@ impl AsyncClient for Client {
                         trace!(message = ?msg,operation = "try_recv",channel = "post");
                         waiting.push_back(msg)
                     }
-                    Err(TryRecvError::Disconnected) => return,
+                    Err(TryRecvError::Disconnected) if pending.is_empty() => return,
                     _ => {}
                 }
 
@@ -178,10 +181,9 @@ impl AsyncClient for Client {
             self.reg_tx.send(msg).unwrap()
         }
 
-        task::spawn_blocking(move || handle.acquire()).await?
-    }
-
-    fn config(&self) -> &Self::Config {
-        &self.config
+        while !client::RequestHandle::is_acquirable(&handle) {
+            time::sleep(Duration::from_nanos(1)).await;
+        }
+        client::RequestHandle::acquire(handle)
     }
 }

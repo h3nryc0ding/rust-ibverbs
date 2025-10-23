@@ -1,21 +1,26 @@
-use crate::client::{BaseClient, BlockingClient};
+use crate::client;
 use bytes::BytesMut;
 use ibverbs::{RemoteMemorySlice, ibv_wc};
 use std::io;
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Clone, Debug)]
 pub struct Config;
 
 pub struct Client {
-    base: BaseClient,
+    base: client::BaseClient,
 
     config: Config,
 }
 
-impl BlockingClient for Client {
+impl client::Client for Client {
     type Config = Config;
+    fn config(&self) -> &Self::Config {
+        &self.config
+    }
+}
 
-    fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+impl client::BlockingClient for Client {
+    fn new(client: client::BaseClient, config: Config) -> io::Result<Self> {
         Ok(Self {
             base: client,
             config,
@@ -39,9 +44,5 @@ impl BlockingClient for Client {
         }
 
         mr.deregister()
-    }
-
-    fn config(&self) -> &Self::Config {
-        &self.config
     }
 }

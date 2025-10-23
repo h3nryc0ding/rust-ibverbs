@@ -1,9 +1,6 @@
 use super::lib::{CopyMessage, Handle, MRMessage, Pending, PostMessage};
-use crate::chunks_mut_exact;
-use crate::client::{
-    BaseClient, NonBlockingClient,
-    lib::{decode_wr_id, encode_wr_id},
-};
+use crate::client::lib::{decode_wr_id, encode_wr_id};
+use crate::{chunks_mut_exact, client};
 use bytes::BytesMut;
 use crossbeam::channel;
 use crossbeam::channel::{Sender, TryRecvError};
@@ -14,11 +11,9 @@ use std::{hint, io, thread};
 use tracing::trace;
 
 #[cfg(feature = "hwlocality")]
-use crate::hwlocality::pin_thread_to_node;
-#[cfg(feature = "hwlocality")]
-use crate::client::NUMA_NODE;
+use crate::{client::NUMA_NODE, hwlocality::pin_thread_to_node};
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Clone, Debug)]
 pub struct Config {
     pub mr_size: usize,
     pub mr_count: usize,
@@ -32,11 +27,17 @@ pub struct Client {
     config: Config,
 }
 
-impl NonBlockingClient for Client {
+impl client::Client for Client {
     type Config = Config;
+    fn config(&self) -> &Self::Config {
+        &self.config
+    }
+}
+
+impl client::NonBlockingClient for Client {
     type Handle = Handle;
 
-    fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+    fn new(client: client::BaseClient, config: Config) -> io::Result<Self> {
         #[cfg(feature = "hwlocality")]
         pin_thread_to_node::<NUMA_NODE>()?;
 
@@ -70,7 +71,7 @@ impl NonBlockingClient for Client {
                         trace!(message = ?msg,operation = "try_recv",channel = "mr");
                         mrs.push(msg.0)
                     }
-                    Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Disconnected) if pending.is_empty() => return,
                     _ => {}
                 }
                 match post_rx.try_recv() {
@@ -78,7 +79,7 @@ impl NonBlockingClient for Client {
                         trace!(message = ?msg,operation = "try_recv",channel = "post");
                         outstanding.push_back(msg)
                     }
-                    Err(TryRecvError::Disconnected) => break,
+                    Err(TryRecvError::Disconnected) if pending.is_empty() => return,
                     _ => {}
                 }
 
@@ -205,9 +206,5 @@ impl NonBlockingClient for Client {
         }
 
         Ok(handle)
-    }
-
-    fn config(&self) -> &Self::Config {
-        &self.config
     }
 }

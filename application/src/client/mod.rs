@@ -6,6 +6,7 @@ pub mod pipeline;
 
 use bytes::BytesMut;
 use ibverbs::{CompletionQueue, ProtectionDomain, QueuePair, RemoteMemorySlice};
+use std::fmt::Debug;
 use std::{hint, io};
 
 #[cfg(feature = "hwlocality")]
@@ -19,11 +20,14 @@ pub struct BaseClient {
     pub(crate) remotes: Vec<RemoteMemorySlice>,
 }
 
-pub trait BlockingClient: Sized {
-    type Config: Eq;
+pub trait Client {
+    type Config: Eq + Debug + Clone;
+    fn config(&self) -> &Self::Config;
+}
+
+pub trait BlockingClient: Client + Sized {
     fn new(c: BaseClient, config: Self::Config) -> io::Result<Self>;
     fn fetch(&mut self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut>;
-    fn config(&self) -> &Self::Config;
 }
 
 pub trait RequestHandle {
@@ -42,21 +46,17 @@ pub trait RequestHandle {
     fn acquire(self) -> io::Result<BytesMut>;
 }
 
-pub trait NonBlockingClient: Sized {
-    type Config: Eq;
+pub trait NonBlockingClient: Client + Sized {
     type Handle: RequestHandle;
     fn new(c: BaseClient, config: Self::Config) -> io::Result<Self>;
     fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<Self::Handle>;
-    fn config(&self) -> &Self::Config;
 }
 
-pub trait AsyncClient: Sized {
-    type Config: Eq;
+pub trait AsyncClient: Client + Sized {
     fn new(c: BaseClient, config: Self::Config) -> impl Future<Output = io::Result<Self>>;
     fn prefetch(
         &self,
         bytes: BytesMut,
         remote: &RemoteMemorySlice,
     ) -> impl Future<Output = io::Result<BytesMut>>;
-    fn config(&self) -> &Self::Config;
 }

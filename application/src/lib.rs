@@ -19,12 +19,12 @@ pub(crate) const BINCODE_CONFIG: Configuration = standard();
 
 #[cfg(feature = "hwlocality")]
 pub mod hwlocality {
-    use std::io;
     use hwlocality::Topology;
     use hwlocality::cpu::binding::CpuBindingFlags;
     use hwlocality::cpu::cpuset::CpuSet;
     use hwlocality::memory::binding::{MemoryBindingFlags, MemoryBindingPolicy};
     use hwlocality::object::depth::Depth;
+    use std::io;
 
     pub fn pin_thread_to_node<const NODE: usize>() -> io::Result<()> {
         let tid = hwlocality::current_thread_id();
@@ -77,4 +77,15 @@ pub fn chunks_unsplit(mut chunks: impl Iterator<Item = BytesMut>) -> io::Result<
     }
 
     Ok(result)
+}
+
+pub fn sequence_multiplied(
+    start: usize,
+    end: usize,
+    multiplier: usize,
+) -> impl Iterator<Item = usize> {
+    iter::successors(Some(start), move |&current| {
+        let next = current * multiplier;
+        if next > end { None } else { Some(next) }
+    })
 }

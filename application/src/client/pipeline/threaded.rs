@@ -1,9 +1,6 @@
 use super::lib::{DeregistrationMessage, Handle, Pending, PostMessage, RegistrationMessage};
-use crate::chunks_mut_exact;
-use crate::client::{
-    BaseClient, NonBlockingClient,
-    lib::{decode_wr_id, encode_wr_id},
-};
+use crate::client::lib::{decode_wr_id, encode_wr_id};
+use crate::{chunks_mut_exact, client};
 use bytes::BytesMut;
 use crossbeam::channel;
 use crossbeam::channel::{Sender, TryRecvError};
@@ -13,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::{io, thread};
 use tracing::trace;
 
-#[derive(Eq, PartialEq)]
+#[derive(Eq, PartialEq, Clone, Debug)]
 pub struct Config {
     pub chunk_size: usize,
     pub concurrency_reg: usize,
@@ -27,11 +24,17 @@ pub struct Client {
     config: Config,
 }
 
-impl NonBlockingClient for Client {
+impl client::Client for Client {
     type Config = Config;
+    fn config(&self) -> &Self::Config {
+        &self.config
+    }
+}
+
+impl client::NonBlockingClient for Client {
     type Handle = Handle;
 
-    fn new(client: BaseClient, config: Config) -> io::Result<Self> {
+    fn new(client: client::BaseClient, config: Config) -> io::Result<Self> {
         let id = AtomicUsize::new(0);
 
         let (reg_tx, reg_rx) = channel::unbounded();
@@ -115,7 +118,7 @@ impl NonBlockingClient for Client {
                         trace!(message = ?msg,operation = "try_recv",channel = "post");
                         waiting.push_back(msg)
                     }
-                    Err(TryRecvError::Disconnected) => return,
+                    Err(TryRecvError::Disconnected) if pending.is_empty() => return,
                     _ => {}
                 }
 
@@ -134,8 +137,6 @@ impl NonBlockingClient for Client {
                         };
                         trace!(message = ?msg, operation = "send", channel = "dereg");
                         dereg_tx.send(msg).unwrap();
-                    } else {
-                        panic!("Unknown WR ID: {wr_id}")
                     }
                 }
             }
@@ -182,9 +183,5 @@ impl NonBlockingClient for Client {
         }
 
         Ok(handle)
-    }
-
-    fn config(&self) -> &Self::Config {
-        &self.config
     }
 }
