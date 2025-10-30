@@ -1,68 +1,143 @@
-# ibverbs
+# Zero-Copy vs. Copy-Based RDMA Data Transfer
 
-[![Crates.io](https://img.shields.io/crates/v/ibverbs.svg)](https://crates.io/crates/ibverbs)
-[![Documentation](https://docs.rs/ibverbs/badge.svg)](https://docs.rs/ibverbs/)
-[![codecov](https://codecov.io/gh/jonhoo/rust-ibverbs/graph/badge.svg?token=3nylKSTA6R)](https://codecov.io/gh/jonhoo/rust-ibverbs)
-[![Dependency status](https://deps.rs/repo/github/jonhoo/rust-ibverbs/status.svg)](https://deps.rs/repo/github/jonhoo/rust-ibverbs)
+This repository is a fork of the [`ibverbs` crate](https://www.google.com/search?q=%5Bhttps://github.com/jonhoo/rust-ibverbs%5D\(https://github.com/jonhoo/rust-ibverbs\)) created to benchmark and compare the performance of different **Copy-Based** vs. **Zero-Copy** RDMA data transfer strategies.
 
-Rust API wrapping the `ibverbs` Remote Direct Memory Access (RDMA) library.
+## Project Overview
 
-`libibverbs` is a library that allows userspace processes to use RDMA "verbs" to perform
-high-throughput, low-latency network operations for both Infiniband (according to the
-Infiniband specifications) and iWarp (iWARP verbs specifications). It handles the control path
-of creating, modifying, querying and destroying resources such as Protection Domains,
-Completion Queues, Queue-Pairs, Shared Receive Queues, Address Handles, and Memory Regions. It
-also handles sending and receiving data posted to QPs and SRQs, and getting completions from
-CQs using polling and completions events.
+The core goal is to measure the latency and throughput of various methods for performing RDMA READ operations. The primary division between strategies is:
 
-A good place to start is to look at the programs in [`examples/`](ibverbs/examples/), and the
-upstream [C examples]. You can test RDMA programs on modern Linux kernels even without specialized
-RDMA hardware by using [SoftRoCE][soft].
+* **Copy-Based:** These strategies pre-allocate and register a large MR with the RDMA device. To read data, the application first **copies** data from its source buffer into this pre-registered MR, and then initiates the RDMA operation.
+* **Zero-Copy:** These strategies attempt to avoid the memory copy. They do this by **registering** the user's data buffer on-the-fly, right before the RDMA operation, and **deregistering** it immediately after. This saves on CPU copy time but incurs the overhead of dynamic memory registration.
 
-## For the detail-oriented
+This project benchmarks several variations of these two fundamental approaches.
 
-The control path is implemented through system calls to the `uverbs` kernel module, which
-further calls the low-level HW driver. The data path is implemented through calls made to
-low-level HW library which, in most cases, interacts directly with the HW provides kernel and
-network stack bypass (saving context/mode switches) along with zero copy and an asynchronous
-I/O model.
+-----
 
-iWARP ethernet NICs support RDMA over hardware-offloaded TCP/IP, while InfiniBand is a general
-high-throughput, low-latency networking technology. InfiniBand host channel adapters (HCAs) and
-iWARP NICs commonly support direct hardware access from userspace (kernel bypass), and
-`libibverbs` supports this when available.
+## Strategies Benchmarked
 
-For more information on RDMA verbs, see the [InfiniBand Architecture Specification][infini]
-vol. 1, especially chapter 11, and the RDMA Consortium's [RDMA Protocol Verbs
-Specification][RFC5040]. See also the upstream [`libibverbs/verbs.h`] file for the original C
-definitions, as well as the manpages for the `ibv_*` methods.
+The `ibverbs-perf/benches` directory contains the client-side implementations for each strategy:
 
-## Library dependency
+* **`copy_blocking`:** A simple, single-threaded copy-based approach. It copies data into a pre-registered MR and blocks until the RDMA READ completes.
+* **`copy_non_blocking`:** A multi-threaded copy-based approach. It uses a pool of worker threads to perform the memory copies concurrently.
+* **`naive_blocking`:** A zero-copy strategy that sequentially registers/read/deregisters in a blocking manner.
+* **`naive_non_blocking`:** The non-blocking, multi-threaded version of the naive strategy.
+* **`pipeline_blocking`:** A zero-copy strategy that splits a large request into smaller chunks and "pipelines" the registration/read/deregistration operations in a blocking manner.
+* **`pipeline_non_blocking`:** The non-blocking, multi-threaded version of the pipeline strategy.
+* **`blocking_ideal` / `non_blocking_ideal`:** Baseline strategies used to measure the "best-case" scenario. They omit data validation and other overheads to provide a theoretical performance ceiling. **`--skip-validation` is required** for these.
 
-`libibverbs` is usually available as a free-standing [library package]. It [used to be][1]
-self-contained, but has recently been adopted into [`rdma-core`]. `cargo` will automatically
-build the necessary library files and place them in `vendor/rdma-core/build/lib`. If a
-system-wide installation is not available, those library files can be used instead by copying
-them to `/usr/lib`, or by adding that path to the dynamic linking search path.
+-----
 
-## Thread safety
+## Building and Running Benchmarks
 
-All interfaces are `Sync` and `Send` since the underlying ibverbs API [is thread safe][safe].
+### Prerequisites
 
-## Documentation
+You must have the `libibverbs` development libraries installed. On Debian-based systems:
 
-Much of the documentation of this crate borrows heavily from the excellent posts over at
-[RDMAmojo]. If you are going to be working a lot with ibverbs, chances are you will want to
-head over there. In particular, [this overview post][1] may be a good place to start.
+```bash
+sudo apt-get install libibverbs-dev
+```
 
-[`rdma-core`]: https://github.com/linux-rdma/rdma-core
-[`libibverbs/verbs.h`]: https://github.com/linux-rdma/rdma-core/blob/master/libibverbs/verbs.h
-[library package]: https://launchpad.net/ubuntu/+source/libibverbs
-[C examples]: https://github.com/linux-rdma/rdma-core/tree/master/libibverbs/examples
-[1]: https://git.kernel.org/pub/scm/libs/infiniband/libibverbs.git/about/
-[infini]: http://www.infinibandta.org/content/pages.php?pg=technology_public_specification
-[RFC5040]: https://tools.ietf.org/html/rfc5040
-[safe]: http://www.rdmamojo.com/2013/07/26/libibverbs-thread-safe-level/
-[soft]: https://github.com/SoftRoCE/rxe-dev/wiki/rxe-dev:-Home
-[RDMAmojo]: http://www.rdmamojo.com/
-[1]: http://www.rdmamojo.com/2012/05/18/libibverbs/
+By default, the benchmarks also use `hwloc` for optimized memory allocation in copy-based strategies. This is recommended for best performance.
+
+```bash
+sudo apt-get install libhwloc-dev
+```
+
+To build without `hwloc`, you can use the `--no-default-features` flag.
+
+### Quick Start: Running a Benchmark
+
+All benchmarks require a server instance to be running. It's recommended to restart the server between long benchmark runs, as it does not currently clean up old QPs.
+
+**1. On the Server Machine (e.g., `192.168.1.100`)**
+
+```bash
+# Start the server
+cargo run --release --bin server
+```
+
+**2. On the Client Machine**
+
+```bash
+# Run the 'copy_blocking' benchmark against the server
+cargo bench --bench copy_blocking -- 192.168.1.100
+
+# Run a different benchmark (e.g., 'naive_non_blocking')
+cargo bench --bench naive_non_blocking -- 192.168.1.100
+
+# See all configuration options for a specific benchmark
+cargo bench --bench copy_blocking -- --help
+```
+
+-----
+
+### Alternative: Using Pre-Compiled Binaries
+
+You can also build the binaries first and run them directly.
+
+**1. Build the Binaries**
+
+```bash
+# Build the server
+cargo build --release --bin server
+
+# Build a specific benchmark
+cargo build --release --bench copy_blocking
+```
+
+**2. Run the Binaries**
+
+```bash
+# Start the server
+./target/release/server
+
+# Run the client benchmark
+# Note: The suffix after the benchmark name is auto-generated by Cargo
+./target/release/deps/copy_blocking-<generated-suffix> <REMOTE_IP>
+```
+
+-----
+
+## Configuration Options
+
+Flags can be passed to the server and client binaries to control the benchmark parameters.
+
+### Server Configuration
+
+* `--size`: Specifies the size (in bytes) of the local Memory Region (MR) containing the data to be read by clients. This should be larger than any single client request size.
+
+### Common Client Configuration
+
+* `--size`: The request size (in bytes) to read from the server. Must be less than or equal to the server's `--size` and less than the maximum single RDMA READ size (2GiB - 1).
+* `--warmup`: Duration (in seconds) to run the benchmark before starting measurements.
+* `--measure`: Duration (in seconds) for the actual measurement period.
+* `--skip-validation`: Disables validation of the read data. **Required for "Ideal" clients.**
+* `--skip-latency`: Disables latency measurements.
+* `--skip-throughput`: Disables throughput measurements.
+* `--memory-max`: Maximum size (in bytes) of all pre-allocated requests in the `VecDeque`.
+* `--operations-max`: Maximum number of pre-allocated requests in the `VecDeque`.
+* `--logging`: Enables logging (currently only for non-blocking clients).
+
+### `copy_blocking` & `copy_non_blocking`
+
+* `--mr-size`: Size of the pre-allocated MRs used for copying.
+* `--concurreny` (non-blocking only): The number of copy worker threads to use.
+
+### `naive_non_blocking` & `pipeline_non_blocking`
+
+* `--concurrency-reg`: The number of registration worker threads to use.
+* `--concurrency-dereg`: The number of deregistration worker threads to use.
+
+### `ideal_blocking`, `ideal_non_blocking`, `pipeline_blocking`, `pipeline_non_blocking`
+
+* `--chunk-size`: The size (in bytes) that a large request will be split into.
+
+-----
+
+## Repository Structure
+
+* **`ibverbs-sys`**: Contains the low-level `ffi` bindings for the C `libibverbs` library.
+* **`ibverbs`**: Contains mid-level, safe Rust wrappers for the C library's structs and functions.
+* **`ibverbs-perf`**: Contains all high-level application logic.
+  * `src/`: Implementation of the server binary and the different transfer strategies.
+  * `benches/`: Contains the client-side benchmark logic for comparing the strategies.

@@ -78,14 +78,3 @@ pub fn chunks_unsplit(mut chunks: impl Iterator<Item = BytesMut>) -> io::Result<
 
     Ok(result)
 }
-
-pub fn sequence_multiplied(
-    start: usize,
-    end: usize,
-    multiplier: usize,
-) -> impl Iterator<Item = usize> {
-    iter::successors(Some(start), move |&current| {
-        let next = current * multiplier;
-        if next > end { None } else { Some(next) }
-    })
-}

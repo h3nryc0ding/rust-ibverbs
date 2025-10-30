@@ -5,12 +5,11 @@ use bytes::BytesMut;
 use ibverbs::{MemoryRegion, RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
 use std::{hint, io};
 use tokio::sync::mpsc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::error::TryRecvError;
-use tokio::{task, time};
+use tokio::task;
 use tracing::trace;
 
 #[cfg(feature = "hwlocality")]
@@ -36,8 +35,9 @@ impl client::Client for Client {
     }
 }
 
-impl client::AsyncClient for Client {
-    async fn new(client: client::BaseClient, config: Config) -> io::Result<Self> {
+impl client::NonBlockingClient for Client {
+    type Handle = Handle;
+    fn new(client: client::BaseClient, config: Config) -> io::Result<Self> {
         #[cfg(feature = "hwlocality")]
         pin_thread_to_node::<NUMA_NODE>()?;
 
@@ -61,7 +61,7 @@ impl client::AsyncClient for Client {
 
         task::spawn_blocking(move || {
             let mut pending = HashMap::new();
-            let mut completions = [ibv_wc::default(); 16];
+            let mut completions = [ibv_wc::default(); 1];
             let mut outstanding = VecDeque::new();
             let mut mrs: Vec<MemoryRegion> = Vec::with_capacity(config.mr_count);
 
@@ -182,7 +182,7 @@ impl client::AsyncClient for Client {
         })
     }
 
-    async fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<BytesMut> {
+    fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<Self::Handle> {
         assert_eq!(bytes.len(), remote.len());
         let chunk_size = self.config.mr_size.min(bytes.len());
 
@@ -203,9 +203,6 @@ impl client::AsyncClient for Client {
             self.post_tx.send(msg).unwrap()
         }
 
-        while !client::RequestHandle::is_acquirable(&handle) {
-            time::sleep(Duration::from_nanos(1)).await;
-        }
-        client::RequestHandle::acquire(handle)
+        Ok(handle)
     }
 }

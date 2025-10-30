@@ -1,4 +1,4 @@
-use crate::{chunks_mut_exact, client};
+use crate::{chunks_mut_exact, chunks_unsplit, client};
 use bytes::BytesMut;
 use ibverbs::{RemoteMemorySlice, ibv_wc};
 use std::collections::{HashMap, VecDeque};
@@ -34,7 +34,7 @@ impl client::BlockingClient for Client {
         assert_eq!(bytes.len(), remote.len());
         let chunk_size = self.config.chunk_size.min(bytes.len());
 
-        let mut completions = vec![ibv_wc::default(); 16];
+        let mut completions = vec![ibv_wc::default(); 1];
 
         let mut chunks = VecDeque::with_capacity(bytes.len() / chunk_size + 1);
         for (chunk, bytes) in chunks_mut_exact(bytes, chunk_size).enumerate() {
@@ -89,22 +89,6 @@ impl client::BlockingClient for Client {
             }
         }
 
-        let Some(mut result) = received.remove(&0) else {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Failed to reassemble bytes: missing chunk 0 of {}", total),
-            ));
-        };
-        for i in 1..total {
-            let Some(bytes) = received.remove(&i) else {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Failed to reassemble bytes: missing chunk {i} of {total}"),
-                ));
-            };
-            result.unsplit(bytes);
-        }
-
-        Ok(result)
+        chunks_unsplit((0..total).map(|i| received.remove(&i).unwrap()))
     }
 }

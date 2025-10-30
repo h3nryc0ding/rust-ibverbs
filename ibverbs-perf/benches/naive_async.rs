@@ -1,6 +1,5 @@
-use application::bench::{BaseCLI, r#async};
-use application::client::{AsyncClient, BlockingClient, naive};
-use application::{KI_B, MI_B, sequence_multiplied};
+use application::bench::{BaseCLI, non_blocking};
+use application::client::{NonBlockingClient, naive};
 use clap::Parser;
 use naive::r#async::{Client, Config};
 use std::io;
@@ -16,5 +15,5 @@ pub struct CLI {
 async fn main() -> io::Result<()> {
     let args = CLI::parse();
 
-    r#async(&args.base, |base, size| Client::new(base, Config {})).await
+    non_blocking(&args.base, |base, _| Client::new(base, Config))
 }

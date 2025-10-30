@@ -1,9 +1,9 @@
 [workspace]
 resolver = "2"
 members = [
-    "application",
     "ibverbs",
     "ibverbs-sys",
+    "ibverbs-perf",
 ]
 
 [profile.release]

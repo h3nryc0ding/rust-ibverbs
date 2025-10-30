@@ -51,12 +51,3 @@ pub trait NonBlockingClient: Client + Sized {
     fn new(c: BaseClient, config: Self::Config) -> io::Result<Self>;
     fn prefetch(&self, bytes: BytesMut, remote: &RemoteMemorySlice) -> io::Result<Self::Handle>;
 }
-
-pub trait AsyncClient: Client + Sized {
-    fn new(c: BaseClient, config: Self::Config) -> impl Future<Output = io::Result<Self>>;
-    fn prefetch(
-        &self,
-        bytes: BytesMut,
-        remote: &RemoteMemorySlice,
-    ) -> impl Future<Output = io::Result<BytesMut>>;
-}
